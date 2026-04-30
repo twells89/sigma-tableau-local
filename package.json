@@ -1,0 +1,17 @@
+{
+  "name": "sigma-tableau-local",
+  "version": "1.0.0",
+  "description": "Local Tableau → Sigma converter with Tableau Server integration",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/tool.test.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "node-fetch": "^2.7.0"
+  },
+  "devDependencies": {
+    "puppeteer": "^24.42.0"
+  }
+}

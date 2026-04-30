@@ -1,0 +1,2083 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tableau → Sigma Converter</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg-primary:   #0a0a0f;
+    --bg-secondary: #12121a;
+    --bg-tertiary:  #1a1a25;
+    --bg-hover:     #222230;
+    --border:       #2a2a3a;
+    --border-focus: #5865f2;
+    --text-primary: #f0f0f5;
+    --text-secondary:#9090a0;
+    --text-muted:   #606070;
+    --accent:       #5865f2;
+    --accent-hover: #6875f3;
+    --success:      #43b581;
+    --warning:      #faa61a;
+    --error:        #f04747;
+    --font-mono:    'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  /* ── Header ─────────────────────────────────────── */
+  .header {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 0 20px;
+    height: 52px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .header-logo {
+    width: 32px; height: 32px;
+    background: var(--accent);
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .header-logo svg { width: 18px; height: 18px; fill: #fff; }
+  .header-title { font-weight: 700; font-size: 15px; letter-spacing: -0.01em; }
+  .header-sub   { color: var(--text-muted); font-size: 12px; margin-top: 1px; }
+  .header-badge {
+    margin-left: auto;
+    background: rgba(88,101,242,0.15);
+    border: 1px solid rgba(88,101,242,0.3);
+    color: var(--accent);
+    font-size: 10px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 10px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  /* ── Main layout ─────────────────────────────────── */
+  .main {
+    display: flex;
+    height: calc(100vh - 52px);
+    overflow: hidden;
+  }
+
+  /* ── Panels ──────────────────────────────────────── */
+  .panel {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px;
+    overflow-y: auto;
+    border-right: 1px solid var(--border);
+  }
+  .panel::-webkit-scrollbar { width: 4px; }
+  .panel::-webkit-scrollbar-track { background: transparent; }
+  .panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .panel-left  { width: 360px; flex-shrink: 0; }
+  .panel-right { flex: 1; }
+
+  .section {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .section-title {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    color: var(--text-muted);
+    margin-bottom: 2px;
+  }
+
+  /* ── Forms ────────────────────────────────────────── */
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  .field label { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
+  .field input, .field select, .field textarea {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-primary);
+    padding: 9px 12px;
+    font-size: 13px;
+    font-family: var(--font-mono);
+    width: 100%;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+    appearance: none;
+  }
+  .field input:focus, .field select:focus, .field textarea:focus {
+    border-color: var(--border-focus);
+    box-shadow: 0 0 0 3px rgba(88,101,242,0.15);
+  }
+  .field input::placeholder { color: var(--text-muted); font-family: var(--font-mono); }
+  .field select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23606070' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    padding-right: 30px;
+    cursor: pointer;
+  }
+  .field-row { display: flex; gap: 8px; }
+  .field-row .field { flex: 1; }
+  .hint { font-size: 10px; color: var(--text-muted); margin-top: 2px; line-height: 1.4; }
+
+  /* ── Buttons ──────────────────────────────────────── */
+  .btn {
+    padding: 9px 16px;
+    border-radius: 8px;
+    border: none;
+    font-size: 13px;
+    font-weight: 600;
+    font-family: 'Plus Jakarta Sans', sans-serif;
+    cursor: pointer;
+    transition: background 0.15s, transform 0.1s, opacity 0.15s, box-shadow 0.15s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    white-space: nowrap;
+  }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none !important; }
+  .btn-primary  { background: var(--accent); color: #fff; }
+  .btn-primary:hover:not(:disabled)  { background: var(--accent-hover); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(88,101,242,0.35); }
+  .btn-success  { background: #2d7d4e; color: #fff; }
+  .btn-success:hover:not(:disabled)  { filter: brightness(1.1); transform: translateY(-1px); }
+  .btn-secondary { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border); }
+  .btn-secondary:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--border-focus); }
+  .btn-sm { padding: 6px 11px; font-size: 11px; border-radius: 6px; }
+  .btn-full { width: 100%; }
+
+  /* ── Status dot ──────────────────────────────────── */
+  .status-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); }
+  .dot {
+    width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+    background: var(--text-muted);
+  }
+  .dot.connected { background: var(--success); box-shadow: 0 0 6px rgba(67,181,129,0.5); }
+  .dot.error     { background: var(--error); }
+  .dot.loading   { background: var(--warning); animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
+
+  /* ── Workbook list ────────────────────────────────── */
+  .workbook-list {
+    max-height: 260px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-tertiary);
+  }
+  .workbook-list::-webkit-scrollbar { width: 4px; }
+  .workbook-list::-webkit-scrollbar-track { background: transparent; }
+  .workbook-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .wb-item {
+    padding: 9px 12px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    transition: background 0.1s;
+  }
+  .wb-item:last-child { border-bottom: none; }
+  .wb-item:hover { background: var(--bg-hover); }
+  .wb-item.selected { background: rgba(88,101,242,0.12); border-left: 3px solid var(--accent); padding-left: 9px; }
+  .wb-icon { font-size: 14px; flex-shrink: 0; opacity: 0.8; }
+  .wb-info { flex: 1; min-width: 0; }
+  .wb-name  { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .wb-meta  { font-size: 10px; color: var(--text-muted); margin-top: 1px; }
+  .wb-project {
+    display: inline-flex; align-items: center; gap: 3px;
+    background: var(--bg-hover); border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 5px; font-size: 10px; color: var(--text-muted);
+    margin-left: 4px;
+  }
+  .wb-search {
+    padding: 8px 12px;
+    font-size: 12px;
+    font-family: 'Plus Jakarta Sans', sans-serif;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+    width: 100%;
+    outline: none;
+  }
+  .wb-search::placeholder { color: var(--text-muted); }
+  .wb-empty { padding: 24px; text-align: center; color: var(--text-muted); font-size: 12px; }
+
+  /* ── Drop zone ───────────────────────────────────── */
+  .drop-zone {
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .drop-zone:hover, .drop-zone.drag-over {
+    border-color: var(--accent);
+    background: rgba(88,101,242,0.06);
+  }
+  .drop-zone-icon { font-size: 22px; margin-bottom: 6px; opacity: 0.7; }
+  .drop-zone-title { font-size: 12px; font-weight: 600; margin-bottom: 3px; }
+  .drop-zone-sub   { font-size: 10px; color: var(--text-muted); }
+
+  /* ── Output textarea ─────────────────────────────── */
+  .output-area {
+    flex: 1;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: #a5d6ff;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    padding: 12px;
+    resize: none;
+    outline: none;
+    min-height: 300px;
+    width: 100%;
+    line-height: 1.6;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .output-area:focus {
+    border-color: var(--border-focus);
+    box-shadow: 0 0 0 3px rgba(88,101,242,0.1);
+  }
+
+  /* ── Warning box ─────────────────────────────────── */
+  .warn-box {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    line-height: 1.7;
+    max-height: 160px;
+    overflow-y: auto;
+    display: none;
+  }
+  .warn-box::-webkit-scrollbar { width: 4px; }
+  .warn-box::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .warn-line-ok   { color: var(--success); }
+  .warn-line-info { color: #7eb8f7; }
+  .warn-line-warn { color: var(--warning); }
+  .warn-line-err  { color: var(--error); }
+
+  /* ── Stat badges ─────────────────────────────────── */
+  .badge-row { display: flex; flex-wrap: wrap; gap: 4px; }
+  .badge {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 3px 9px;
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-muted);
+  }
+
+  /* ── Toast ───────────────────────────────────────── */
+  .toast-container {
+    position: fixed; bottom: 20px; right: 20px;
+    display: flex; flex-direction: column; gap: 8px; z-index: 9999;
+  }
+  .toast {
+    padding: 10px 16px;
+    border-radius: 10px;
+    font-size: 12px;
+    font-weight: 500;
+    animation: slideUp 0.25s ease;
+    max-width: 380px;
+    backdrop-filter: blur(8px);
+  }
+  .toast.success { background: rgba(43,101,67,0.95); border: 1px solid var(--success); color: #b8f0d0; }
+  .toast.error   { background: rgba(100,30,30,0.95); border: 1px solid var(--error);   color: #fecaca; }
+  .toast.warning { background: rgba(100,70,10,0.95); border: 1px solid var(--warning); color: #fde9b0; }
+  .toast.info    { background: rgba(20,30,70,0.95);  border: 1px solid var(--accent);  color: #c7d2fe; }
+  @keyframes slideUp { from{transform:translateY(20px);opacity:0} to{transform:translateY(0);opacity:1} }
+
+  /* ── Modal overlay ───────────────────────────────── */
+  .modal-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.7); z-index: 1000;
+    align-items: center; justify-content: center;
+    backdrop-filter: blur(4px);
+  }
+  .modal-overlay.active { display: flex; }
+  .modal-box {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 24px;
+    width: 440px;
+    max-width: 95vw;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.6);
+  }
+  .modal-title { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; }
+  .modal-footer { display: flex; gap: 8px; justify-content: flex-end; }
+
+  /* ── Divider ─────────────────────────────────────── */
+  .divider {
+    border: none; border-top: 1px solid var(--border); margin: 4px 0;
+  }
+
+  details summary { cursor: pointer; user-select: none; list-style: none; font-size: 11px; color: var(--text-muted); }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before { content: '▶ '; font-size: 9px; }
+  details[open] summary::before { content: '▼ '; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-logo">
+    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M11 2v4H7v2h4v4H5v2h6v4H7v2h4v4h2v-4h4v-2h-4v-4h6v-2h-6V8h4V6h-4V2z"/></svg>
+  </div>
+  <div>
+    <div class="header-title">Tableau → Sigma Converter</div>
+    <div class="header-sub">Connect to Tableau Cloud · Convert workbooks · Save data models to Sigma</div>
+  </div>
+  <span class="header-badge">Local</span>
+</div>
+
+<div class="main">
+  <!-- ── Left panel: Tableau Server + file upload ───────── -->
+  <div class="panel panel-left">
+
+    <!-- Tableau Server connection -->
+    <div class="section" id="tsSection">
+      <div class="section-title">Tableau Server</div>
+
+      <div class="field">
+        <label>Tableau Server URL</label>
+        <input type="text" id="tsUrl" placeholder="https://tableau.company.com" value="">
+        <div class="hint">Handled by the local proxy — no CORS issues.</div>
+      </div>
+
+      <div class="field">
+        <label>Site <span style="color:var(--text-muted);font-size:10px;">(leave blank for Default)</span></label>
+        <input type="text" id="tsSite" placeholder="default">
+      </div>
+
+      <div class="field">
+        <label>Personal Access Token Name</label>
+        <input type="text" id="tsPatName" placeholder="my-token">
+      </div>
+
+      <div class="field">
+        <label>Personal Access Token Secret</label>
+        <input type="password" id="tsPatSecret" placeholder="••••••••••••••••">
+      </div>
+
+      <div class="status-row">
+        <div class="dot" id="tsDot"></div>
+        <span id="tsStatus" style="color:var(--text-muted);">Not connected</span>
+      </div>
+
+      <div style="display:flex;gap:6px;">
+        <button class="btn btn-primary" style="flex:1;" id="tsConnectBtn" onclick="tsConnect()">Connect to Tableau Server</button>
+        <button class="btn btn-secondary btn-sm" id="tsEnvBtn" onclick="tsAutoConnect()" title="Auto-fill from server environment variables">⚡ Auto</button>
+      </div>
+    </div>
+
+    <!-- Workbook list -->
+    <div class="section" id="tsWorkbookSection" style="display:none;">
+      <div class="section-title">Workbooks</div>
+      <div class="workbook-list" id="tsWorkbookList">
+        <div class="wb-empty">No workbooks loaded</div>
+      </div>
+      <button class="btn btn-primary btn-full" id="tsLoadBtn" onclick="tsLoadSelected()" disabled>
+        ⬇ Load Selected Workbook
+      </button>
+    </div>
+
+    <hr class="divider">
+
+    <!-- Manual file upload fallback -->
+    <details>
+      <summary style="font-size:11px;color:var(--text-muted);padding:4px 0;">Upload file manually</summary>
+      <div style="margin-top:10px;" class="section">
+        <div
+          class="drop-zone"
+          id="tableauDropZone"
+          onclick="document.getElementById('tableauFileInput').click()"
+          ondragover="event.preventDefault();this.classList.add('drag-over')"
+          ondragleave="this.classList.remove('drag-over')"
+          ondrop="handleTableauDrop(event)">
+          <div class="drop-zone-icon">📂</div>
+          <div class="drop-zone-title">.twb / .twbx / .tds / .tdsx</div>
+          <div class="drop-zone-sub">Click to browse or drag &amp; drop</div>
+        </div>
+        <input type="file" id="tableauFileInput" accept=".twb,.twbx,.tds,.tdsx" style="display:none" onchange="handleTableauFileInput(event)">
+        <div id="tableauFileList" style="display:flex;flex-direction:column;gap:4px;"></div>
+      </div>
+    </details>
+
+    <!-- Converter config -->
+    <div class="section">
+      <div class="section-title">Converter Options</div>
+
+      <div id="tableauDatasourceSection" style="display:none;" class="field">
+        <label>Data Source</label>
+        <select id="tableauDatasourceSelect" onchange="onTableauDatasourceChange()"></select>
+        <div id="tableauDatasourceInfo" class="hint" style="display:none;"></div>
+      </div>
+
+      <div class="field">
+        <label>Sigma Connection</label>
+        <select id="tableauConnectionId">
+          <option value="">— Connect to Sigma to load —</option>
+        </select>
+      </div>
+
+      <div class="field-row">
+        <div class="field">
+          <label>Database <span style="font-size:10px;">(optional)</span></label>
+          <input type="text" id="tableauDatabase" placeholder="auto">
+        </div>
+        <div class="field">
+          <label>Schema <span style="font-size:10px;">(optional)</span></label>
+          <input type="text" id="tableauSchema" placeholder="auto">
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Join Strategy</label>
+        <select id="tableauJoinStrategy">
+          <option value="auto">Auto (relationships)</option>
+          <option value="relationships">Force Relationships</option>
+          <option value="joins">Force Physical Joins</option>
+        </select>
+      </div>
+
+      <div class="badge-row" id="tableauInputStats"></div>
+
+      <button class="btn btn-primary btn-full" id="tableauConvertBtn" onclick="runTableauConversion()" disabled>
+        📊 Convert to Sigma JSON
+      </button>
+    </div>
+
+  </div>
+
+  <!-- ── Right panel: Sigma auth + JSON output ────────────── -->
+  <div class="panel panel-right">
+
+    <!-- Sigma connection -->
+    <div class="section">
+      <div class="section-title">Sigma Connection</div>
+      <div class="field-row">
+        <div class="field">
+          <label>Client ID</label>
+          <input type="text" id="sigmaClientId" placeholder="client_id_...">
+        </div>
+        <div class="field">
+          <label>Client Secret</label>
+          <input type="password" id="sigmaClientSecret" placeholder="••••••••">
+        </div>
+        <div class="field" style="max-width:140px;">
+          <label>Region</label>
+          <select id="sigmaRegion">
+            <option value="https://aws-api.sigmacomputing.com">US (AWS)</option>
+            <option value="https://api.eu.sigmacomputing.com">EU</option>
+            <option value="https://api.ca.sigmacomputing.com">Canada</option>
+            <option value="https://api.au.sigmacomputing.com">Australia</option>
+            <option value="https://api.uk.sigmacomputing.com">UK</option>
+          </select>
+        </div>
+      </div>
+      <div class="status-row">
+        <div class="dot" id="sigDot"></div>
+        <span id="sigStatus" style="color:var(--text-muted);">Not connected</span>
+        <button class="btn btn-secondary btn-sm" id="sigConnectBtn" onclick="sigmaConnect()" style="margin-left:auto;">Connect</button>
+      </div>
+    </div>
+
+    <!-- Output -->
+    <div class="section" style="flex:1;min-height:0;">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <div class="section-title" style="margin:0;">Sigma Data Model JSON</div>
+        <div style="display:flex;gap:6px;">
+          <button class="btn btn-secondary btn-sm" id="tableauCopyBtn" onclick="copyOutput()" disabled>📋 Copy</button>
+        </div>
+      </div>
+
+      <div class="warn-box" id="tableauWarningBox"></div>
+
+      <textarea class="output-area" id="tableauJsonOutput" readonly
+        placeholder="Connect to Tableau Server and load a workbook, or drop a file on the left.
+
+After converting:
+• Joins → Sigma relationships or physical joins
+• Calculated fields → metrics or calculated columns
+• Parameters → Sigma controls
+• LOD expressions flagged for review"></textarea>
+
+      <div class="badge-row" id="tableauOutputStats"></div>
+
+      <button class="btn btn-success btn-full" id="tableauSaveBtn" onclick="saveToSigma()" disabled>
+        💾 Save to Sigma
+      </button>
+    </div>
+
+  </div>
+</div>
+
+<!-- Save location modal -->
+<div class="modal-overlay" id="saveModal">
+  <div class="modal-box">
+    <div class="modal-title">Save to Sigma</div>
+
+    <div class="field">
+      <label>Model Name</label>
+      <input type="text" id="saveModelName" placeholder="My Data Model">
+    </div>
+
+    <div class="field">
+      <label>Workspace</label>
+      <select id="saveWorkspace" onchange="onSaveWorkspaceChange()">
+        <option value="">Loading workspaces…</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label>Folder</label>
+      <select id="saveFolder" disabled>
+        <option value="">Select a workspace first…</option>
+      </select>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeSaveModal()">Cancel</button>
+      <button class="btn btn-success" id="saveConfirmBtn" onclick="confirmSave()" disabled>Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────
+
+const state = {
+    useFriendlyNames: true,
+    accessToken: null,
+    tokenExpiry:  0,
+    clientId:     null,
+    clientSecret: null,
+    baseUrl:      'https://aws-api.sigmacomputing.com',
+    connections:  []
+};
+
+const tsState = {
+    token:    null,
+    siteId:   null,
+    siteName: null,
+    workbooks: [],
+    selectedId: null
+};
+
+let _tableauParsed = null;
+
+// ── Toast ─────────────────────────────────────────────────────────────────
+
+function showToast(msg, type = 'info') {
+    const c = document.getElementById('toastContainer');
+    const t = document.createElement('div');
+    t.className = 'toast ' + type;
+    t.textContent = msg;
+    c.appendChild(t);
+    setTimeout(() => {
+        t.style.animation = 'slideUp 0.2s ease reverse';
+        setTimeout(() => t.remove(), 250);
+    }, 4000);
+}
+
+// ── Shared utilities (from index.html) ───────────────────────────────────
+
+const SIGMA_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+const _usedIds = new Set();
+
+function sigmaShortId(len = 10) {
+    let id;
+    do {
+        id = Array.from({length: len}, () =>
+            SIGMA_CHARS[Math.floor(Math.random() * SIGMA_CHARS.length)]).join('');
+    } while (_usedIds.has(id));
+    _usedIds.add(id);
+    return id;
+}
+
+function sigmaInodeId(identifier) {
+    return `inode-${sigmaShortId(22)}/${identifier.toUpperCase()}`;
+}
+
+function sigmaDisplayName(s, friendly) {
+    const useFriendly = (friendly !== undefined) ? friendly : state.useFriendlyNames;
+    if (useFriendly === false) return s || '';
+    const words = (s || '').toLowerCase().split('_');
+    return words.map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function isConnectionFriendly(connectionId) {
+    if (!connectionId || !state.connections) return true;
+    const conn = state.connections.find(c => c.connectionId === connectionId);
+    return conn ? !!conn.friendlyName : true;
+}
+
+function friendlyNameWarning() {
+    if (state.useFriendlyNames === false) {
+        return 'ℹ️ Connection has Use Friendly Names OFF — column formulas use raw physical names';
+    }
+    return null;
+}
+
+function _inferSigmaFormat(formula, displayName) {
+    if (!formula) return null;
+    const f = formula.trim();
+    const n = (displayName || '').toLowerCase();
+    const alreadyPctScale = /\*\s*100\b/.test(f);
+    if (alreadyPctScale && /\b(rate|margin|pct|percent|ratio|share|mix)\b|%/.test(n)) {
+        return { kind: 'number', formatString: ',.2f', suffix: '%' };
+    }
+    if (/^[A-Za-z]+\s*\([^)]+\)\s*\/\s*[A-Za-z]+\s*\([^)]+\)$/.test(f)) {
+        return { kind: 'number', formatString: ',.2%' };
+    }
+    if (/\b(rate|margin|pct|percent|ratio|share|mix)\b|%/.test(n)) {
+        return { kind: 'number', formatString: ',.2%' };
+    }
+    if (/\b(revenue|sales|profit|cost|spend|amount|discounts?|price|value)\b/.test(n)) {
+        return { kind: 'number', formatString: '$,.2f', currencySymbol: '$' };
+    }
+    if (/^Count(?:Distinct|If|DistinctIf)?\s*\(/.test(f)) {
+        return { kind: 'number', formatString: ',.0f' };
+    }
+    return null;
+}
+
+// ── Sigma API ─────────────────────────────────────────────────────────────
+
+async function _ensureFreshToken() {
+    if (!state.clientId || !state.clientSecret) return;
+    if (state.accessToken && Date.now() < state.tokenExpiry - 60000) return;
+    const resp = await fetch(`${state.baseUrl}/v2/auth/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+            grant_type: 'client_credentials',
+            client_id: state.clientId,
+            client_secret: state.clientSecret
+        })
+    });
+    if (!resp.ok) throw new Error('Token refresh failed');
+    const d = await resp.json();
+    state.accessToken = d.access_token;
+    state.tokenExpiry = Date.now() + (d.expires_in * 1000);
+}
+
+async function sigmaFetch(path, options = {}) {
+    const url = path.startsWith('http') ? path : state.baseUrl + path;
+    await _ensureFreshToken();
+    const isJson = options.body && typeof options.body === 'string';
+    return fetch(url, {
+        ...options,
+        headers: {
+            'Authorization': `Bearer ${state.accessToken}`,
+            ...(isJson ? { 'Content-Type': 'application/json' } : {}),
+            ...(options.headers || {})
+        }
+    });
+}
+
+async function fetchAllPages(url) {
+    const entries = [];
+    let nextPage = null;
+    do {
+        const pageUrl = nextPage
+            ? `${url}${url.includes('?') ? '&' : '?'}page=${encodeURIComponent(nextPage)}`
+            : url;
+        const resp = await sigmaFetch(pageUrl);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        entries.push(...(data.entries || []));
+        nextPage = data.nextPage || null;
+    } while (nextPage);
+    return entries;
+}
+
+async function sigmaConnect() {
+    const clientId     = document.getElementById('sigmaClientId').value.trim();
+    const clientSecret = document.getElementById('sigmaClientSecret').value.trim();
+    const baseUrl      = document.getElementById('sigmaRegion').value;
+
+    if (!clientId || !clientSecret) {
+        showToast('Enter Sigma Client ID and Secret', 'warning'); return;
+    }
+    state.baseUrl      = baseUrl;
+    state.clientId     = clientId;
+    state.clientSecret = clientSecret;
+    state.accessToken  = null;
+    state.tokenExpiry  = 0;
+
+    const btn = document.getElementById('sigConnectBtn');
+    btn.disabled = true; btn.textContent = '…';
+    setDot('sig', 'loading'); setSigStatus('Connecting…');
+
+    try {
+        await _ensureFreshToken();
+
+        // Load connections
+        const resp = await sigmaFetch('/v2/connections');
+        if (resp.ok) {
+            const data = await resp.json();
+            state.connections = data.entries || [];
+            populateConnectionDropdown();
+        }
+
+        setDot('sig', 'connected');
+        setSigStatus('Connected to Sigma');
+        showToast('Connected to Sigma', 'success');
+    } catch(e) {
+        setDot('sig', 'error');
+        setSigStatus('Connection failed');
+        showToast('Sigma connection failed: ' + e.message, 'error');
+    } finally {
+        btn.disabled = false; btn.textContent = 'Connect';
+    }
+}
+
+function populateConnectionDropdown() {
+    const sel = document.getElementById('tableauConnectionId');
+    sel.innerHTML = '<option value="">— Select a connection —</option>';
+    for (const c of state.connections) {
+        const o = document.createElement('option');
+        o.value = c.connectionId;
+        o.textContent = (c.name || c.connectionId) + (c.friendlyName ? ' ✦' : '');
+        o.title = c.friendlyName ? 'Friendly Names ON' : 'Friendly Names OFF';
+        sel.appendChild(o);
+    }
+    if (state.connections.length > 0) sel.value = state.connections[0].connectionId;
+}
+
+function setDot(prefix, cls) {
+    const d = document.getElementById(prefix + 'Dot');
+    d.className = 'dot ' + (cls || '');
+}
+
+function setSigStatus(msg) {
+    document.getElementById('sigStatus').textContent = msg;
+}
+
+function setTsStatus(msg, cls) {
+    document.getElementById('tsStatus').textContent = msg;
+    setDot('ts', cls || '');
+}
+
+// ── Tableau Server integration ────────────────────────────────────────────
+
+async function tsAutoConnect() {
+    const btn = document.getElementById('tsEnvBtn');
+    btn.disabled = true; btn.textContent = '…';
+    try {
+        const resp = await fetch('/api/ts-env-config');
+        const cfg  = await resp.json();
+        if (!cfg.available) {
+            showToast('No Tableau env vars configured on server', 'warning');
+            return;
+        }
+        document.getElementById('tsUrl').value       = cfg.serverUrl;
+        document.getElementById('tsSite').value      = cfg.site;
+        document.getElementById('tsPatName').value   = cfg.patName;
+        document.getElementById('tsPatSecret').value = cfg.patSecret;
+        await tsConnect();
+    } catch(e) {
+        showToast('Auto-connect failed: ' + e.message, 'error');
+    } finally {
+        btn.disabled = false; btn.textContent = '⚡ Auto';
+    }
+}
+
+async function tsConnect() {
+    const serverUrl = document.getElementById('tsUrl').value.trim().replace(/\/$/, '');
+    const site      = document.getElementById('tsSite').value.trim() || '';
+    const patName   = document.getElementById('tsPatName').value.trim();
+    const patSecret = document.getElementById('tsPatSecret').value.trim();
+
+    if (!patName || !patSecret) {
+        showToast('Enter PAT name and secret', 'warning'); return;
+    }
+
+    const btn = document.getElementById('tsConnectBtn');
+    btn.disabled = true;
+    setTsStatus('Connecting…', 'loading');
+
+    // Store server URL for subsequent proxy calls
+    window._tsServerPath = serverUrl ? ('/api/tableau') : '/api/tableau';
+    // If the user gave a URL, configure the proxy base. Since the proxy is server.js
+    // (running on the same origin), we just use relative paths + the server handles forwarding.
+    // The user can also set TABLEAU_SERVER when starting server.js.
+
+    try {
+        const body = {
+            credentials: {
+                personalAccessTokenName:   patName,
+                personalAccessTokenSecret: patSecret,
+                site: { contentUrl: site }
+            }
+        };
+
+        const resp = await fetch('/api/tableau/3.21/auth/signin', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify(body)
+        });
+
+        if (!resp.ok) {
+            const txt = await resp.text();
+            throw new Error(`HTTP ${resp.status}: ${txt.slice(0, 200)}`);
+        }
+
+        const data = await resp.json();
+        tsState.token    = data.credentials.token;
+        tsState.siteId   = data.credentials.site.id;
+        tsState.siteName = data.credentials.site.contentUrl || 'default';
+
+        setTsStatus('Connected · site: ' + (tsState.siteName || 'default'), 'connected');
+        showToast('Connected to Tableau Server', 'success');
+
+        await tsListWorkbooks();
+        document.getElementById('tsWorkbookSection').style.display = '';
+
+    } catch(e) {
+        setTsStatus('Connection failed', 'error');
+        showToast('Tableau Server error: ' + e.message, 'error');
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function tsListWorkbooks() {
+    const url = `/api/tableau/3.21/sites/${tsState.siteId}/workbooks?pageSize=1000`;
+    const resp = await fetch(url, {
+        headers: { 'X-Tableau-Auth': tsState.token, 'Accept': 'application/json' }
+    });
+
+    if (!resp.ok) throw new Error('Failed to list workbooks: HTTP ' + resp.status);
+    const data = await resp.json();
+    tsState.workbooks = (data.workbooks && data.workbooks.workbook) || [];
+
+    renderWorkbookList(tsState.workbooks);
+}
+
+function renderWorkbookList(workbooks) {
+    const container = document.getElementById('tsWorkbookList');
+    if (workbooks.length === 0) {
+        container.innerHTML = '<div class="wb-empty">No workbooks found</div>';
+        return;
+    }
+
+    let html = `<input class="wb-search" placeholder="🔍  Search workbooks…" oninput="filterWorkbooks(this.value)">`;
+    for (const wb of workbooks) {
+        const project = wb.project ? wb.project.name : '';
+        const owner   = wb.owner   ? wb.owner.name   : '';
+        const meta    = [owner, project ? `📁 ${project}` : ''].filter(Boolean).join(' · ');
+        html += `<div class="wb-item" data-id="${escapeHtml(wb.id)}" data-name="${escapeHtml(wb.name || '')}"
+                      onclick="selectWorkbook('${escapeHtml(wb.id)}', this)">
+                   <span class="wb-icon">📊</span>
+                   <span class="wb-info">
+                     <span class="wb-name">${escapeHtml(wb.name || wb.id)}</span>
+                     ${meta ? `<span class="wb-meta">${escapeHtml(meta)}</span>` : ''}
+                   </span>
+                 </div>`;
+    }
+    container.innerHTML = html;
+}
+
+function filterWorkbooks(query) {
+    const q = query.toLowerCase();
+    const items = document.querySelectorAll('#tsWorkbookList .wb-item');
+    for (const item of items) {
+        const name = (item.dataset.name || '').toLowerCase();
+        item.style.display = name.includes(q) ? '' : 'none';
+    }
+}
+
+function selectWorkbook(id, el) {
+    document.querySelectorAll('#tsWorkbookList .wb-item').forEach(i => i.classList.remove('selected'));
+    el.classList.add('selected');
+    tsState.selectedId = id;
+    document.getElementById('tsLoadBtn').disabled = false;
+}
+
+async function tsLoadSelected() {
+    if (!tsState.selectedId) return;
+    const btn = document.getElementById('tsLoadBtn');
+    btn.disabled = true; btn.textContent = '⬇ Downloading…';
+
+    try {
+        const url = `/api/tableau/3.21/sites/${tsState.siteId}/workbooks/${tsState.selectedId}/content`;
+        const resp = await fetch(url, {
+            headers: { 'X-Tableau-Auth': tsState.token }
+        });
+
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+
+        const blob = await resp.blob();
+        const ct = resp.headers.get('content-type') || '';
+
+        // Determine filename from Content-Disposition header if available
+        const cd = resp.headers.get('content-disposition') || '';
+        const fnMatch = cd.match(/filename[^;=\n]*=(?:(['"])(.+?)\1|([^;\s]+))/i);
+        const selectedItem = document.querySelector('#tsWorkbookList .wb-item.selected');
+        const wbName = (selectedItem ? selectedItem.dataset.name : '') || 'workbook';
+
+        let filename;
+        if (fnMatch) {
+            filename = fnMatch[2] || fnMatch[3] || (wbName + '.twbx');
+        } else {
+            // Guess extension from content-type
+            const isTwb = ct.includes('xml') || ct.includes('text');
+            filename = wbName + (isTwb ? '.twb' : '.twbx');
+        }
+
+        const text = await blob.text();
+
+        // Try to parse as XML first (TWB), else as ZIP (TWBX)
+        if (filename.toLowerCase().endsWith('.twb') || text.trim().startsWith('<?xml') || text.trim().startsWith('<')) {
+            ingestTableauXml(text, filename);
+        } else {
+            // Treat as TWBX (zip)
+            const ab = await blob.arrayBuffer();
+            const zip = await JSZip.loadAsync(ab);
+            let twbFile = null;
+            zip.forEach((path, file) => {
+                if (!twbFile && path.endsWith('.twb')) twbFile = file;
+            });
+            if (!twbFile) throw new Error('No .twb file found inside the workbook package');
+            const xml = await twbFile.async('string');
+            ingestTableauXml(xml, filename.replace(/\.twbx$/i, '.twb'));
+        }
+
+    } catch(e) {
+        showToast('Load failed: ' + e.message, 'error');
+    } finally {
+        btn.disabled = false; btn.textContent = '⬇ Load Selected Workbook';
+    }
+}
+
+// ── File upload (manual fallback) ─────────────────────────────────────────
+
+function handleTableauFileInput(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    processTableauFile(file);
+    event.target.value = '';
+}
+
+function handleTableauDrop(event) {
+    event.preventDefault();
+    document.getElementById('tableauDropZone').classList.remove('drag-over');
+    const file = event.dataTransfer.files[0];
+    if (!file) return;
+    processTableauFile(file);
+}
+
+async function processTableauFile(file) {
+    const name = file.name.toLowerCase();
+    if (name.endsWith('.twb') || name.endsWith('.tds')) {
+        const text = await file.text();
+        ingestTableauXml(text, file.name);
+    } else if (name.endsWith('.twbx') || name.endsWith('.tdsx')) {
+        try {
+            const ab = await file.arrayBuffer();
+            const zip = await JSZip.loadAsync(ab);
+            let xmlFile = null;
+            zip.forEach((path, f) => {
+                if (!xmlFile && (path.endsWith('.twb') || path.endsWith('.tds'))) xmlFile = f;
+            });
+            if (!xmlFile) throw new Error('No .twb/.tds inside archive');
+            const xml = await xmlFile.async('string');
+            ingestTableauXml(xml, file.name);
+        } catch(e) {
+            showToast('Could not read file: ' + e.message, 'error');
+        }
+    } else {
+        showToast('Unsupported file type', 'error');
+    }
+}
+
+function ingestTableauXml(xml, filename) {
+    let doc;
+    try {
+        doc = new DOMParser().parseFromString(xml, 'text/xml');
+        if (doc.querySelector('parsererror')) throw new Error('XML parse error');
+    } catch(e) {
+        showToast('Failed to parse XML: ' + e.message, 'error'); return;
+    }
+
+    const datasources = [];
+    const parameters  = [];
+
+    for (const ds of doc.querySelectorAll('workbook > datasources > datasource, datasource')) {
+        if (ds.getAttribute('name') === 'Parameters') {
+            for (const col of ds.querySelectorAll(':scope > column')) {
+                const colName    = col.getAttribute('caption') || col.getAttribute('name') || '';
+                const colType    = col.getAttribute('datatype') || 'string';
+                const domainType = col.getAttribute('param-domain-type') || 'all';
+                const members    = Array.from(col.querySelectorAll('member')).map(m => m.getAttribute('value')).filter(Boolean);
+                const calcEl     = col.querySelector('calculation');
+                parameters.push({ name: colName.replace(/^\[|\]$/g,''), type: colType, domainType, members, defaultVal: calcEl ? calcEl.getAttribute('formula') : '' });
+            }
+            continue;
+        }
+        const name       = ds.getAttribute('caption') || ds.getAttribute('name') || 'Unnamed';
+        const connection = ds.querySelector(':scope > connection');
+        const connClass  = connection ? (connection.getAttribute('class') || '') : '';
+        const dbname     = connection ? (connection.getAttribute('dbname') || connection.getAttribute('database') || '') : '';
+        const schema     = connection ? (connection.getAttribute('schema') || '') : '';
+        datasources.push({ name, element: ds, connection, connClass, dbname, schema });
+    }
+
+    // Deduplicate by name — Tableau embeds one copy per worksheet; keep the first (most complete) per name.
+    const _seenDsNames = new Set();
+    const uniqueDatasources = datasources.filter(ds => {
+        if (_seenDsNames.has(ds.name)) return false;
+        _seenDsNames.add(ds.name);
+        return true;
+    });
+
+    _tableauParsed = { datasources: uniqueDatasources, parameters, filename };
+
+    // Update file badge
+    const fileList = document.getElementById('tableauFileList');
+    const ext = filename.toLowerCase().endsWith('.twbx') ? 'TWBX' : filename.toLowerCase().endsWith('.twb') ? 'TWB' : filename.toLowerCase().endsWith('.tdsx') ? 'TDSX' : 'TDS';
+    fileList.innerHTML = `<div style="display:flex;align-items:center;gap:6px;padding:4px 8px;background:var(--bg-tertiary);border-radius:6px;font-size:11px;">
+        <span>📊</span>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(filename)}</span>
+        <span style="font-size:10px;color:var(--text-muted);">${ext}</span>
+    </div>`;
+
+    // Populate datasource select (use deduplicated list)
+    const sel = document.getElementById('tableauDatasourceSelect');
+    sel.innerHTML = uniqueDatasources.map((ds, i) =>
+        `<option value="${i}">${escapeHtml(ds.name)}${ds.connClass ? ' (' + ds.connClass + ')' : ''}</option>`
+    ).join('');
+    document.getElementById('tableauDatasourceSection').style.display = uniqueDatasources.length > 0 ? '' : 'none';
+    if (uniqueDatasources.length > 0) onTableauDatasourceChange();
+
+    // Input stats
+    document.getElementById('tableauInputStats').innerHTML = [
+        `<span class="badge">${uniqueDatasources.length} data source${uniqueDatasources.length!==1?'s':''}</span>`,
+        parameters.length ? `<span class="badge">${parameters.length} param${parameters.length!==1?'s':''}</span>` : ''
+    ].filter(Boolean).join('');
+
+    document.getElementById('tableauConvertBtn').disabled = datasources.length === 0;
+    showToast(`Loaded ${datasources.length} data source${datasources.length!==1?'s':''}`, 'success');
+}
+
+function onTableauDatasourceChange() {
+    if (!_tableauParsed) return;
+    const idx = parseInt(document.getElementById('tableauDatasourceSelect').value) || 0;
+    const ds  = _tableauParsed.datasources[idx];
+    if (!ds) return;
+    const dbEl  = document.getElementById('tableauDatabase');
+    const schEl = document.getElementById('tableauSchema');
+    if (ds.dbname && !dbEl.value)  dbEl.value  = ds.dbname;
+    if (ds.schema && !schEl.value) schEl.value = ds.schema;
+    const parts = [ds.connClass, ds.dbname, ds.schema].filter(Boolean);
+    const infoEl = document.getElementById('tableauDatasourceInfo');
+    if (parts.length) { infoEl.textContent = parts.join(' · '); infoEl.style.display = ''; }
+    else { infoEl.style.display = 'none'; }
+}
+
+// ── Tableau → Sigma formula conversion ───────────────────────────────────
+
+const TABLEAU_FUNC_MAP = {
+    'AVG': 'Avg', 'MAX': 'Max', 'MIN': 'Min', 'MEDIAN': 'Median',
+    'SUM': 'Sum', 'ABS': 'Abs', 'CEILING': 'Ceiling', 'FLOOR': 'Floor',
+    'ROUND': 'Round', 'SQRT': 'Sqrt', 'POWER': 'Power',
+    'STR': 'Text', 'INT': 'Int', 'FLOAT': 'Number',
+    'LEN': 'Len', 'UPPER': 'Upper', 'LOWER': 'Lower',
+    'TRIM': 'Trim', 'LTRIM': 'Ltrim', 'RTRIM': 'Rtrim',
+    'LEFT': 'Left', 'RIGHT': 'Right', 'MID': 'Mid',
+    'REPLACE': 'Replace', 'CONTAINS': 'Contains',
+    'STARTSWITH': 'StartsWith', 'ENDSWITH': 'EndsWith', 'FIND': 'Find',
+    'TODAY': 'Today', 'NOW': 'Now',
+    'YEAR': 'Year', 'MONTH': 'Month', 'DAY': 'Day',
+    'HOUR': 'Hour', 'MINUTE': 'Minute', 'SECOND': 'Second',
+    'WEEK': 'Week', 'QUARTER': 'Quarter',
+    'DATE': 'Date', 'DATETIME': 'Datetime',
+};
+
+function tableauParseLOD(formula) {
+    const f = formula.trim();
+    const lodMatch = f.match(/^\{\s*(FIXED|INCLUDE|EXCLUDE)\s*([\s\S]*?)\s*:\s*([\s\S]+?)\s*\}$/i);
+    if (!lodMatch) return null;
+    const lodType = lodMatch[1].toUpperCase();
+    const dimsRaw = lodMatch[2].trim();
+    const aggRaw  = lodMatch[3].trim();
+    const dims = [];
+    if (dimsRaw) {
+        const dm = dimsRaw.match(/\[([^\]]+)\]/g);
+        if (dm) dm.forEach(d => dims.push(d.replace(/^\[|\]$/g, '')));
+    }
+    let sigmaAgg = aggRaw;
+    sigmaAgg = sigmaAgg.replace(/\bCOUNTD\s*\(/gi, 'CountDistinct(');
+    sigmaAgg = sigmaAgg.replace(/\bSUM\s*\(/gi, 'Sum(');
+    sigmaAgg = sigmaAgg.replace(/\bAVG\s*\(/gi, 'Avg(');
+    sigmaAgg = sigmaAgg.replace(/\bMIN\s*\(/gi, 'Min(');
+    sigmaAgg = sigmaAgg.replace(/\bMAX\s*\(/gi, 'Max(');
+    sigmaAgg = sigmaAgg.replace(/\bMEDIAN\s*\(/gi, 'Median(');
+    sigmaAgg = sigmaAgg.replace(/\bCOUNT\s*\(([^)]+)\)/gi, 'CountIf(IsNotNull($1))');
+    sigmaAgg = sigmaAgg.replace(/\[([A-Z][A-Z0-9_]{2,})\]/g, (m, c) => '[' + sigmaDisplayName(c) + ']');
+    sigmaAgg = sigmaAgg.replace(/'([^']*)'/g, '"$1"');
+    return { lodType, dims, sigmaAgg };
+}
+
+function tableauFormulaToSigma(formula, warnings) {
+    if (!formula || !formula.trim()) return '';
+    let f = formula.trim();
+
+    if (/^\s*\{/.test(f)) {
+        const lodParsed = tableauParseLOD(f);
+        if (lodParsed) return { _isLOD: true, ...lodParsed, raw: f };
+        if (warnings) warnings.push('⚠ LOD expression not converted: ' + f.slice(0,60));
+        return '/* LOD: ' + f.replace(/\/\*/g,'').replace(/\*\//g,'') + ' */';
+    }
+    if (/^(WINDOW_|RUNNING_|FIRST\(|LAST\(|INDEX\(|RANK\b|RANK_|LOOKUP\(|PREVIOUS_VALUE\()/i.test(f)) {
+        let tcMatch = f.match(/^RUNNING_SUM\s*\(\s*(?:SUM\s*\(\s*)?(\[[^\]]+\])\s*\)?\s*\)/i);
+        if (tcMatch) return 'CumulativeSum(' + tcMatch[1] + ')';
+        tcMatch = f.match(/^RUNNING_AVG\s*\(\s*(?:SUM\s*\(\s*)?(\[[^\]]+\])\s*\)?\s*\)/i);
+        if (tcMatch) return 'CumulativeAvg(' + tcMatch[1] + ')';
+        tcMatch = f.match(/^RUNNING_(MIN|MAX)\s*\(\s*(?:(?:SUM|MIN|MAX)\s*\(\s*)?(\[[^\]]+\])\s*\)?\s*\)/i);
+        if (tcMatch) return 'Cumulative' + tcMatch[1].charAt(0) + tcMatch[1].slice(1).toLowerCase() + '(' + tcMatch[2] + ')';
+        tcMatch = f.match(/^RANK\s*\(\s*(?:SUM\s*\(\s*)?(\[[^\]]+\])\s*\)?\s*\)/i);
+        if (tcMatch) return 'Rank(' + tcMatch[1] + ')';
+        tcMatch = f.match(/^RANK_DENSE\s*\(\s*(?:SUM\s*\(\s*)?(\[[^\]]+\])\s*\)?\s*\)/i);
+        if (tcMatch) return 'DenseRank(' + tcMatch[1] + ')';
+        tcMatch = f.match(/^RANK_UNIQUE\s*\(\s*(?:SUM\s*\(\s*)?(\[[^\]]+\])\s*\)?\s*\)/i);
+        if (tcMatch) return 'Rank(' + tcMatch[1] + ')';
+        if (/^INDEX\s*\(\s*\)/i.test(f)) return 'RowNumber()';
+        tcMatch = f.match(/^WINDOW_SUM\s*\(\s*(SUM|COUNT|AVG|MIN|MAX)\s*\(\s*(\[[^\]]+\])\s*\)\s*\)/i);
+        if (tcMatch) {
+            const aggMap = { SUM: 'Sum', COUNT: 'Count', AVG: 'Avg', MIN: 'Min', MAX: 'Max' };
+            return 'GrandTotal(' + (aggMap[tcMatch[1].toUpperCase()] || tcMatch[1]) + '(' + tcMatch[2] + '))';
+        }
+        if (warnings) warnings.push('⚠ Table calculation not converted: ' + f.slice(0,60));
+        return '/* table calc: ' + f.replace(/\/\*/g,'').replace(/\*\//g,'') + ' */';
+    }
+
+    f = f.replace(/\bZN\s*\(([^)]+)\)/gi, 'Coalesce($1, 0)');
+    f = f.replace(/\bIFNULL\s*\(/gi, 'Coalesce(').replace(/\bIFERROR\s*\(/gi, 'Coalesce(');
+    f = f.replace(/\bISNULL\s*\(/gi, 'IsNull(');
+    f = f.replace(/\bCOUNT\s*\(([^)]+)\)/gi, (m, arg) => 'CountIf(IsNotNull(' + arg.trim() + '))');
+    f = f.replace(/\bCOUNTD\s*\(/gi, 'CountDistinct(');
+    f = f.replace(/\bATTR\s*\(([^)]+)\)/gi, '$1');
+    f = tableauIfToSigma(f);
+    f = f.replace(/\bIIF\s*\(/gi, 'If(');
+    f = tableauCaseToSigma(f);
+    f = f.replace(/\bDATEPART\s*\(\s*'(\w+)'\s*,\s*([^)]+)\)/gi, (m, part, dateArg) => {
+        const pm = { year:'Year',month:'Month',day:'Day',hour:'Hour',minute:'Minute',second:'Second',week:'Week',quarter:'Quarter',dayofweek:'DayOfWeek',weekday:'DayOfWeek' };
+        const fn = pm[part.toLowerCase()];
+        return fn ? fn + '(' + dateArg.trim() + ')' : m;
+    });
+    f = f.replace(/\bDATETRUNC\s*\(\s*'([^']+)'\s*,/gi, 'DateTrunc("$1",');
+    f = f.replace(/\bDATEADD\s*\(\s*'([^']+)'\s*,/gi,  'DateAdd("$1",');
+    f = f.replace(/\bDATEDIFF\s*\(\s*'([^']+)'\s*,/gi, 'DateDiff("$1",');
+    for (const [tab, sig] of Object.entries(TABLEAU_FUNC_MAP)) {
+        f = f.replace(new RegExp('\\b' + tab + '\\s*\\(', 'gi'), sig + '(');
+    }
+    f = f.replace(/'([^']*)'/g, '"$1"');
+    f = f.replace(/\bNOT\b/g, 'Not').replace(/\bAND\b/g, 'and').replace(/\bOR\b/g, 'or');
+    f = f.replace(/\bTRUE\b/gi, 'True').replace(/\bFALSE\b/gi, 'False').replace(/\bNULL\b/gi, 'null');
+    f = f.replace(/\[([A-Z][A-Z0-9_]{2,})\]/g, (match, colName) => {
+        if (colName === colName.toLowerCase() || colName.includes(' ')) return match;
+        return '[' + sigmaDisplayName(colName) + ']';
+    });
+    return f.trim();
+}
+
+function tableauIfToSigma(f) {
+    return f.replace(/\bIF\b([\s\S]+?)\bEND\b/gi, function(match) {
+        let inner = match.replace(/^\s*IF\s*/i, '').replace(/\s*END\s*$/i, '');
+        const elseIdx = inner.search(/\bELSE\b(?!\s*IF\b)/i);
+        let elseVal = 'null';
+        if (elseIdx >= 0) {
+            elseVal = tableauFormulaToSigma(inner.slice(elseIdx).replace(/^\s*ELSE\s*/i,'').trim(), null);
+            inner = inner.slice(0, elseIdx);
+        }
+        const parts = inner.split(/\bELSEIF\b/i);
+        let result = elseVal;
+        for (let i = parts.length - 1; i >= 0; i--) {
+            const tp = parts[i].split(/\bTHEN\b/i);
+            if (tp.length < 2) continue;
+            const cond = tableauFormulaToSigma(tp[0].trim(), null);
+            const val  = tableauFormulaToSigma(tp[1].trim(), null);
+            result = 'If(' + cond + ', ' + val + ', ' + result + ')';
+        }
+        return result;
+    });
+}
+
+function tableauCaseToSigma(f) {
+    return f.replace(/\bCASE\b([\s\S]+?)\bEND\b/gi, function(match, body) {
+        const elseIdx = body.search(/\bELSE\b/i);
+        let elseVal = 'null', whenBody = body;
+        if (elseIdx >= 0) {
+            elseVal  = tableauFormulaToSigma(body.slice(elseIdx).replace(/^\s*ELSE\s*/i,'').trim(), null);
+            whenBody = body.slice(0, elseIdx);
+        }
+        const fieldMatch = whenBody.match(/^([\s\S]*?)\bWHEN\b/i);
+        const field = fieldMatch ? tableauFormulaToSigma(fieldMatch[1].trim(), null) : '[?]';
+        const pairs = whenBody.replace(/^[\s\S]*?\bWHEN\b/i,'').split(/\bWHEN\b/i).filter(Boolean);
+        let result = elseVal;
+        for (let i = pairs.length - 1; i >= 0; i--) {
+            const tp = pairs[i].split(/\bTHEN\b/i);
+            if (tp.length < 2) continue;
+            result = 'If(' + field + ' = ' + tableauFormulaToSigma(tp[0].trim(), null) + ', ' + tableauFormulaToSigma(tp[1].trim(), null) + ', ' + result + ')';
+        }
+        return result;
+    });
+}
+
+function tableauIsAggregate(formula) {
+    return /\b(SUM|AVG|COUNT|COUNTD|MAX|MIN|MEDIAN|STDEV|VAR|ATTR)\s*\(/i.test(formula);
+}
+
+function tableauExtractPath(rel, dbOverride, schOverride) {
+    const tableAttr = rel.getAttribute('table') || rel.getAttribute('name') || '';
+    const clean = tableAttr
+        .replace(/\[([^\]]+)\]/g, '$1')   // strip [...] brackets
+        .replace(/\s*\([^)]*\)/g, '');     // strip (CSA.TABLE_NAME) disambiguation before dot-split
+    const parts = clean.split('.')
+        .map(p => p.replace(/"/g, '').toUpperCase().trim())
+        .filter(p => p && !/^[0-9A-F]{8}-[0-9A-F]{4}-/i.test(p));  // drop virtual-connection UUID segments
+    const tableName = parts[parts.length - 1];
+    const schema    = schOverride || (parts.length >= 2 ? parts[parts.length - 2] : '');
+    const db        = dbOverride  || (parts.length >= 3 ? parts[0] : '');
+    return [db, schema, tableName].filter(Boolean);
+}
+
+function tableauBuildElements(rootRel, connection, connectionId, dbOverride, schOverride, strategy, elements, warnings) {
+    const relType = rootRel.getAttribute('type') || 'table';
+
+    if (relType === 'text') {
+        const sql = rootRel.textContent.trim();
+        elements.push({ id: sigmaShortId(), kind: 'table',
+            source: { connectionId, kind: 'sql', statement: sql },
+            columns: [], metrics: [], order: [] });
+        warnings.push('ℹ Custom SQL data source — SQL extracted as-is');
+        return;
+    }
+
+    if (relType === 'table') {
+        const path = tableauExtractPath(rootRel, dbOverride, schOverride);
+        const tableName = path[path.length - 1] || '';
+        const columns = [], order = [];
+        for (const col of rootRel.querySelectorAll(':scope > columns > column')) {
+            const key = (col.getAttribute('name') || '').toUpperCase();
+            if (!key) continue;
+            const id = sigmaInodeId(key);
+            columns.push({ id, formula: '[' + tableName + '/' + sigmaDisplayName(key) + ']' });
+            order.push(id);
+        }
+        elements.push({ id: sigmaShortId(), kind: 'table',
+            source: { connectionId, kind: 'warehouse-table', path },
+            columns, metrics: [], order });
+        return;
+    }
+
+    if (relType === 'collection') {
+        // Tableau 2020.2+ relationship model: sibling <relation type="table"> children
+        // with join keys defined in a <relationships> element at the datasource level.
+        const childRels = Array.from(rootRel.children).filter(c => c.tagName.toLowerCase() === 'relation');
+        if (childRels.length === 0) {
+            warnings.push('⚠ Collection datasource has no child relations — skipped');
+            return;
+        }
+
+        // Build a complete UUID→{caption, objectId} map from <metadata-record class='column'> elements.
+        // These live inside <connection><metadata-records> and carry ALL columns for every table,
+        // grouped by <object-id> whose value is "[TableFullName_HASH]".
+        const metaByTable = {}; // tableFullName → [{uuid, caption}]  (order preserved)
+        for (const mr of connection.querySelectorAll('metadata-records > metadata-record')) {
+            if ((mr.getAttribute('class') || '') !== 'column') continue;
+            const uuid    = (mr.querySelector('remote-name')?.textContent  || '').trim();
+            const cap     = (mr.querySelector('caption')?.textContent      || '').trim();
+            const objIdRaw = (mr.querySelector('object-id')?.textContent   || '').replace(/^\[|\]$/g, '');
+            if (!uuid || !cap || !objIdRaw) continue;
+            // objIdRaw is "TABLE_FULL_NAME_HASH" — strip the trailing _HASH to get the table name
+            const tblName = objIdRaw.replace(/_[0-9A-Fa-f]{16,}$/, '');
+            if (!metaByTable[tblName]) metaByTable[tblName] = [];
+            metaByTable[tblName].push({ uuid, caption: cap });
+        }
+
+        // fullName = Tableau name with disambiguation (e.g. "ORDER_FACT (CSA.ORDER_FACT)")
+        // cleanName = last path segment for Sigma formulas (e.g. "ORDER_FACT")
+        const elementMap = {}; // fullName → { element, colIdMap, cleanName }
+
+        for (const rel of childRels) {
+            const fullName  = rel.getAttribute('name') || rel.getAttribute('table') || '';
+            const path      = tableauExtractPath(rel, dbOverride, schOverride);
+            const cleanName = path[path.length - 1] || fullName;
+            const columns = [], order = [], colIdMap = {};
+
+            // Use metadata-records as the source of truth for columns — they include every
+            // column in the table, not just the join keys referenced in the inline <columns> block.
+            const metaCols = metaByTable[fullName] || [];
+            for (const { uuid, caption } of metaCols) {
+                const cleanCaption = caption.replace(/\s*\(.*\)$/, '').trim(); // strip disambiguation
+                const idKey = uuid.toUpperCase();
+                const id    = sigmaInodeId(idKey);
+                columns.push({ id, formula: '[' + cleanName + '/' + cleanCaption + ']', name: cleanCaption });
+                order.push(id);
+                colIdMap[idKey] = id;
+                colIdMap[uuid.toUpperCase().replace(/-/g, '_')] = id;
+                colIdMap[cleanCaption.toUpperCase()] = id;
+                colIdMap[cleanCaption.toUpperCase().replace(/\s+/g, '_')] = id;
+            }
+
+            // Fall back to inline <column> elements if no metadata-records found for this table
+            if (metaCols.length === 0) {
+                for (const col of rel.querySelectorAll(':scope > columns > column')) {
+                    const rawName = (col.getAttribute('name') || '').replace(/^\[|\]$/g, '');
+                    if (!rawName) continue;
+                    const isUuid     = /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(rawName);
+                    const formulaCol = isUuid ? (col.getAttribute('caption') || rawName) : sigmaDisplayName(rawName);
+                    const idKey      = rawName.toUpperCase().replace(/\s+/g, '_');
+                    const id         = sigmaInodeId(idKey);
+                    columns.push({ id, formula: '[' + cleanName + '/' + formulaCol + ']' });
+                    order.push(id);
+                    colIdMap[rawName.toUpperCase()] = id;
+                    colIdMap[idKey] = id;
+                }
+            }
+
+            const el = { id: sigmaShortId(), kind: 'table',
+                source: { connectionId, kind: 'warehouse-table', path },
+                columns, metrics: [], order };
+            elementMap[fullName] = { element: el, colIdMap, cleanName };
+            elements.push(el);
+        }
+
+        // <relationships> lives inside <object-graph> which is a direct child of <datasource>.
+        const dsEl = connection.parentElement || rootRel.parentElement?.parentElement;
+        const relsEl = dsEl ? dsEl.querySelector('object-graph > relationships, relationships') : null;
+        if (relsEl) {
+            for (const rel of relsEl.querySelectorAll(':scope > relationship')) {
+                const firstEp  = rel.querySelector('first-end-point');
+                const secondEp = rel.querySelector('second-end-point');
+                if (!firstEp || !secondEp) continue;
+
+                const firstObjId  = firstEp.getAttribute('object-id')  || '';
+                const secondObjId = secondEp.getAttribute('object-id') || '';
+
+                // Object-ids are "TableName_HASH" — match by prefix
+                const firstTable  = Object.keys(elementMap).find(n => firstObjId.startsWith(n + '_'))  || '';
+                const secondTable = Object.keys(elementMap).find(n => secondObjId.startsWith(n + '_')) || '';
+                const firstEntry  = elementMap[firstTable];
+                const secondEntry = elementMap[secondTable];
+                if (!firstEntry || !secondEntry) {
+                    warnings.push('⚠ Relationship: could not match "' + firstObjId + '" / "' + secondObjId + '"');
+                    continue;
+                }
+
+                const exprs = rel.querySelectorAll('expression > expression');
+                if (exprs.length < 2) continue;
+
+                // If expression is a function call like DATE([uuid]) or TRUNC([uuid]), extract the inner UUID.
+                // This happens when Tableau applies a cast (e.g. ORDER_FACT.date_key → DATE → join to date dim).
+                function extractOpKey(raw) {
+                    const fnWrap = raw.match(/^\w+\(\[?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\]?\)$/i);
+                    return fnWrap ? '[' + fnWrap[1] + ']' : raw;
+                }
+
+                // Use \(.*\) (greedy, any char) to handle nested parens like "(DATE_DIM (CSA.DATE_DIM)1)"
+                const rawFirst  = extractOpKey(exprs[0].getAttribute('op') || '');
+                const rawSecond = extractOpKey(exprs[1].getAttribute('op') || '');
+                const keyFirst  = rawFirst.replace(/^\[|\]$/g, '').replace(/\s*\(.*\)$/, '').trim().toUpperCase();
+                const keySecond = rawSecond.replace(/^\[|\]$/g, '').replace(/\s*\(.*\)$/, '').trim().toUpperCase();
+
+                let srcColId = firstEntry.colIdMap[keyFirst] || firstEntry.colIdMap[keyFirst.replace(/\s+/g,'_')];
+                if (!srcColId) {
+                    srcColId = sigmaInodeId(keyFirst.replace(/\s+/g,'_'));
+                    const colName    = rawFirst.replace(/^\[|\]$/g,'').replace(/\s*\(.*\)$/,'').trim();
+                    const isUuid     = /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(colName.toLowerCase());
+                    const formulaCol = isUuid ? colName : sigmaDisplayName(colName);
+                    firstEntry.element.columns.push({ id: srcColId, formula: '[' + firstEntry.cleanName + '/' + formulaCol + ']' });
+                    firstEntry.element.order.push(srcColId);
+                    firstEntry.colIdMap[keyFirst] = srcColId;
+                }
+                let tgtColId = secondEntry.colIdMap[keySecond] || secondEntry.colIdMap[keySecond.replace(/\s+/g,'_')];
+                if (!tgtColId) {
+                    tgtColId = sigmaInodeId(keySecond.replace(/\s+/g,'_'));
+                    const colName    = rawSecond.replace(/^\[|\]$/g,'').replace(/\s*\(.*\)$/,'').trim();
+                    const isUuid     = /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(colName.toLowerCase());
+                    const formulaCol = isUuid ? colName : sigmaDisplayName(colName);
+                    secondEntry.element.columns.push({ id: tgtColId, formula: '[' + secondEntry.cleanName + '/' + formulaCol + ']' });
+                    secondEntry.element.order.push(tgtColId);
+                    secondEntry.colIdMap[keySecond] = tgtColId;
+                }
+
+                if (!firstEntry.element.relationships) firstEntry.element.relationships = [];
+                firstEntry.element.relationships.push({
+                    id: sigmaShortId(),
+                    targetElementId: secondEntry.element.id,
+                    keys: [{ sourceColumnId: srcColId, targetColumnId: tgtColId }],
+                    name: secondEntry.cleanName
+                });
+                warnings.push('ℹ Relationship ' + firstEntry.cleanName + ' → ' + secondEntry.cleanName + ' on ' + keyFirst + ' = ' + keySecond);
+            }
+        } else {
+            warnings.push('ℹ Collection datasource: no <relationships> element — elements created without joins');
+        }
+        return;
+    }
+
+    if (relType === 'join') {
+        const tables = [];
+        tableauCollectTables(rootRel, tables);
+        if (tables.length === 0) { warnings.push('⚠ Could not parse join structure'); return; }
+
+        const elementMap = {};
+        for (const t of tables) {
+            const path = tableauExtractPath(t.rel, dbOverride, schOverride);
+            const tableName = path[path.length - 1] || t.rel.getAttribute('name') || '';
+            if (elementMap[tableName]) continue;
+            const columns = [], order = [];
+            for (const col of t.rel.querySelectorAll(':scope > columns > column')) {
+                const key = (col.getAttribute('name') || '').toUpperCase();
+                if (!key) continue;
+                const id = sigmaInodeId(key);
+                columns.push({ id, formula: '[' + tableName + '/' + sigmaDisplayName(key) + ']' });
+                order.push(id);
+            }
+            const elemId = sigmaShortId();
+            const el = { id: elemId, kind: 'table',
+                source: { connectionId, kind: 'warehouse-table', path },
+                columns, metrics: [], order };
+            elementMap[tableName] = { element: el, colIdMap: {} };
+            columns.forEach(c => {
+                const m = c.formula.match(/\/([^\]]+)\]$/);
+                if (m) {
+                    const dk = m[1].toUpperCase();
+                    const pk = dk.replace(/\s+/g, '_');
+                    elementMap[tableName].colIdMap[dk] = c.id;
+                    elementMap[tableName].colIdMap[pk] = c.id;
+                }
+            });
+            elements.push(el);
+        }
+
+        const primaryTableName = tableauExtractPath(tables[0].rel, dbOverride, schOverride).pop();
+        const primaryEntry = elementMap[primaryTableName];
+
+        for (let i = 1; i < tables.length; i++) {
+            const t = tables[i];
+            if (!t.leftKey || !t.rightKey) continue;
+            const leftKey  = t.leftKey.replace(/^\[|\]$/g,'').split(/[\.\]]\[?/).pop().replace(/\]$/,'').toUpperCase();
+            const rightKey = t.rightKey.replace(/^\[|\]$/g,'').split(/[\.\]]\[?/).pop().replace(/\]$/,'').toUpperCase();
+            const tgtName  = tableauExtractPath(t.rel, dbOverride, schOverride).pop();
+            const tgtEntry = elementMap[tgtName];
+            if (!primaryEntry || !tgtEntry) continue;
+
+            let srcColId = primaryEntry.colIdMap[leftKey];
+            if (!srcColId) {
+                srcColId = sigmaInodeId(leftKey);
+                if (!primaryEntry.element.columns.find(c => c.id === srcColId)) {
+                    primaryEntry.element.columns.push({ id: srcColId, formula: '[' + primaryTableName + '/' + sigmaDisplayName(leftKey) + ']' });
+                    primaryEntry.element.order.push(srcColId);
+                }
+                primaryEntry.colIdMap[leftKey] = srcColId;
+            }
+            let tgtColId = tgtEntry.colIdMap[rightKey];
+            if (!tgtColId) {
+                tgtColId = sigmaInodeId(rightKey);
+                if (!tgtEntry.element.columns.find(c => c.id === tgtColId)) {
+                    tgtEntry.element.columns.push({ id: tgtColId, formula: '[' + tgtName + '/' + sigmaDisplayName(rightKey) + ']' });
+                    tgtEntry.element.order.push(tgtColId);
+                }
+                tgtEntry.colIdMap[rightKey] = tgtColId;
+            }
+
+            if (strategy !== 'joins') {
+                if (!primaryEntry.element.relationships) primaryEntry.element.relationships = [];
+                const relName = (primaryEntry.element.relationships.some(r => r.targetElementId === tgtEntry.element.id))
+                    ? tgtName + ' via ' + sigmaDisplayName(leftKey)
+                    : tgtName;
+                primaryEntry.element.relationships.push({
+                    id: sigmaShortId(),
+                    targetElementId: tgtEntry.element.id,
+                    keys: [{ sourceColumnId: srcColId, targetColumnId: tgtColId }],
+                    name: relName
+                });
+            }
+            warnings.push('ℹ Join ' + primaryTableName + ' → ' + tgtName + ' (' + (t.joinType || 'left') + ') on ' + leftKey + ' = ' + rightKey);
+        }
+
+        elements.sort((a, b) => {
+            const aR = !!(a.relationships && a.relationships.length);
+            const bR = !!(b.relationships && b.relationships.length);
+            return aR === bR ? 0 : aR ? 1 : -1;
+        });
+    }
+}
+
+function tableauCollectTables(rel, tables) {
+    const type = rel.getAttribute('type') || 'table';
+    if (type === 'table') { tables.push({ rel, leftKey: '', rightKey: '', joinType: '' }); return; }
+    if (type === 'join') {
+        const joinType = rel.getAttribute('join') || 'left';
+        let leftKey = '', rightKey = '';
+        const clause = rel.querySelector(':scope > clause');
+        if (clause) {
+            const exprs = clause.querySelectorAll('expression > expression');
+            if (exprs.length >= 2) {
+                leftKey  = exprs[0].getAttribute('op') || '';
+                rightKey = exprs[1].getAttribute('op') || '';
+            }
+        }
+        const childRels = Array.from(rel.children).filter(c => c.tagName.toLowerCase() === 'relation');
+        if (childRels.length === 2) {
+            tableauCollectTables(childRels[0], tables);
+            const beforeRight = tables.length;
+            tableauCollectTables(childRels[1], tables);
+            for (let i = beforeRight; i < tables.length; i++) {
+                if (!tables[i].leftKey) {
+                    tables[i].joinType = joinType;
+                    tables[i].leftKey  = leftKey;
+                    tables[i].rightKey = rightKey;
+                }
+            }
+        } else {
+            for (const child of childRels) tableauCollectTables(child, tables);
+        }
+    }
+}
+
+// ── Main conversion ───────────────────────────────────────────────────────
+
+function runTableauConversion() {
+    if (!_tableauParsed || _tableauParsed.datasources.length === 0) {
+        showToast('Load a Tableau workbook first', 'warning'); return;
+    }
+    const btn = document.getElementById('tableauConvertBtn');
+    btn.disabled = true; btn.textContent = '⏳ Converting…';
+
+    try {
+        _usedIds.clear();
+
+        const idx          = parseInt(document.getElementById('tableauDatasourceSelect').value) || 0;
+        const ds           = _tableauParsed.datasources[idx];
+        const connectionId = document.getElementById('tableauConnectionId').value.trim() || '<CONNECTION_ID>';
+        state.useFriendlyNames = isConnectionFriendly(connectionId);
+        const dbOverride   = document.getElementById('tableauDatabase').value.trim().toUpperCase();
+        const schOverride  = document.getElementById('tableauSchema').value.trim().toUpperCase();
+        const strategy     = document.getElementById('tableauJoinStrategy').value;
+        const warnings = [], elements = [];
+        { const fnWarn = friendlyNameWarning(); if (fnWarn) warnings.push(fnWarn); }
+
+        const connection   = ds.connection;
+        const rootRelation = connection ? connection.querySelector(':scope > relation') : null;
+
+        if (!rootRelation) {
+            warnings.push('⚠ No relation found — cannot determine table structure');
+        } else {
+            tableauBuildElements(rootRelation, connection, connectionId, dbOverride, schOverride, strategy, elements, warnings);
+        }
+
+        const allColIdMap = {};
+        elements.forEach(el => {
+            (el.columns || []).forEach(c => {
+                const m = c.formula.match(/\/([^\]]+)\]$/);
+                if (m) allColIdMap[m[1].toUpperCase()] = { colId: c.id, el };
+            });
+        });
+
+        const factEl = elements.find(e => e.relationships && e.relationships.length > 0)
+            || elements.reduce((best, e) =>
+                (e.columns||[]).length > (best.columns||[]).length ? e : best
+            , elements[0]);
+
+        if (factEl) {
+            const factColIdMap = {};
+            (factEl.columns || []).forEach(c => {
+                const m = c.formula.match(/\/([^\]]+)\]$/);
+                if (m) factColIdMap[m[1].toUpperCase()] = c.id;
+            });
+
+            const displayNameMap = {};
+            elements.forEach(el => {
+                (el.columns || []).forEach(c => {
+                    const fm = c.formula.match(/\/([^\]]+)\]$/);
+                    if (fm) displayNameMap[fm[1].toUpperCase()] = { colId: c.id, el };
+                });
+            });
+
+            const lodChildElements = [];
+            const setColIds = [];
+            const factTableName = factEl.name
+                || (factEl.source && factEl.source.path ? factEl.source.path[factEl.source.path.length - 1] : 'FACT');
+
+            for (const col of ds.element.querySelectorAll(':scope > column')) {
+                const rawName  = col.getAttribute('name') || '';
+                const caption  = col.getAttribute('caption') || rawName.replace(/^\[|\]$/g,'');
+                const hidden   = col.getAttribute('hidden') === 'true';
+                const calcEl   = col.querySelector('calculation');
+                const formula  = calcEl ? (calcEl.getAttribute('formula') || '') : '';
+                const fieldKey = rawName.replace(/^\[|\]$/g,'');
+
+                if (hidden || !fieldKey || fieldKey.startsWith('Number of Records')) continue;
+
+                if (calcEl && calcEl.getAttribute('class') === 'bin') {
+                    const binSource = (calcEl.getAttribute('formula') || '').replace(/^\[|\]$/g, '');
+                    const binSize   = parseFloat(calcEl.getAttribute('size') || '10');
+                    const peg       = parseFloat(calcEl.getAttribute('peg') || '0');
+                    if (binSource && binSize > 0) {
+                        const srcDisplay  = sigmaDisplayName(binSource.replace(/\./g, '_'));
+                        const binFormula  = `Floor(([${srcDisplay}] - ${peg}) / ${binSize}) * ${binSize} + ${peg}`;
+                        const id          = sigmaShortId();
+                        const fmt         = _inferSigmaFormat(binFormula, caption);
+                        const bc          = { id, formula: binFormula, name: caption };
+                        if (fmt) bc.format = fmt;
+                        factEl.columns.push(bc);
+                        factEl.order.push(id);
+                        warnings.push('✅ Bin "' + caption + '" → bucket column (size=' + binSize + ')');
+                        continue;
+                    }
+                }
+
+                if (calcEl && calcEl.getAttribute('class') === 'categorical-set') {
+                    const setFormula = (calcEl.getAttribute('formula') || '').trim();
+                    const topFilter  = calcEl.querySelector('groupfilter[function="end"], groupfilter[function="top"]');
+                    if (topFilter) {
+                        warnings.push('⚠ Set "' + caption + '": Top N set → skip. Recreate in Sigma.');
+                        continue;
+                    }
+                    let sigmaSetFormula = null;
+                    if (setFormula) {
+                        sigmaSetFormula = tableauFormulaToSigma(setFormula, warnings);
+                    } else {
+                        const memberFilters = Array.from(calcEl.querySelectorAll('groupfilter[function="member"]'));
+                        if (memberFilters.length > 0) {
+                            const mbf = {};
+                            for (const gf of memberFilters) {
+                                const level = (gf.getAttribute('level') || '').replace(/^\[|\]$/g, '');
+                                const val   = (gf.getAttribute('member') || '').replace(/^"|"$/g, '');
+                                if (!level || !val) continue;
+                                (mbf[level] || (mbf[level] = [])).push(val);
+                            }
+                            const conds = Object.entries(mbf).map(([field, vals]) => {
+                                const dn = sigmaDisplayName(field);
+                                return vals.length === 1
+                                    ? `[${dn}] = "${vals[0]}"`
+                                    : `In([${dn}], ${vals.map(v => `"${v}"`).join(', ')})`;
+                            });
+                            sigmaSetFormula = conds.length === 1 ? conds[0] : conds.map(c => `(${c})`).join(' And ');
+                        }
+                    }
+                    if (!sigmaSetFormula) { warnings.push('⚠ Set "' + caption + '": unrecognised — skipped.'); continue; }
+                    const id  = sigmaShortId();
+                    const fmt = _inferSigmaFormat(String(sigmaSetFormula), caption);
+                    const sc  = { id, formula: String(sigmaSetFormula), name: caption };
+                    if (fmt) sc.format = fmt;
+                    factEl.columns.push(sc);
+                    setColIds.push(id);
+                    warnings.push('✅ Set "' + caption + '" → boolean column');
+                    continue;
+                }
+
+                if (formula) {
+                    const sigmaFormula = tableauFormulaToSigma(formula, warnings);
+                    if (!sigmaFormula) continue;
+
+                    if (sigmaFormula && typeof sigmaFormula === 'object' && sigmaFormula._isLOD) {
+                        const lod = sigmaFormula;
+                        if (lod.lodType === 'FIXED' && lod.dims.length > 0) {
+                            let allDimsFound = true;
+                            const dimInfos = [];
+                            for (const dimName of lod.dims) {
+                                const found = displayNameMap[dimName.toUpperCase()]
+                                    || displayNameMap[sigmaDisplayName(dimName).toUpperCase()];
+                                if (found) {
+                                    const parentCol = (found.el.columns || []).find(c => c.id === found.colId);
+                                    const dispName  = parentCol
+                                        ? (parentCol.name || (parentCol.formula.match(/\/([^\]]+)\]$/) || [])[1] || dimName)
+                                        : dimName;
+                                    dimInfos.push({ displayName: dispName, parentColId: found.colId });
+                                } else {
+                                    allDimsFound = false;
+                                    warnings.push('⚠ LOD "' + caption + '": dim [' + dimName + '] not found');
+                                }
+                            }
+                            if (allDimsFound && dimInfos.length > 0) {
+                                const dimKey = dimInfos.map(d => d.displayName).sort().join(',');
+                                let existingChild = lodChildElements.find(ce => ce._dimKey === dimKey);
+                                if (existingChild) {
+                                    const existingFormulas = new Set(existingChild.columns.map(c => c.formula));
+                                    const aggColRefs = lod.sigmaAgg.match(/\[([^\]]+)\]/g) || [];
+                                    for (const ref of aggColRefs) {
+                                        const colName = ref.replace(/^\[|\]$/g, '');
+                                        const refFormula = '[' + factTableName + '/' + colName + ']';
+                                        if (!existingFormulas.has(refFormula)) {
+                                            existingFormulas.add(refFormula);
+                                            const refColId = sigmaShortId();
+                                            existingChild.columns.push({ id: refColId, formula: refFormula });
+                                            existingChild.order.push(refColId);
+                                        }
+                                    }
+                                    const calcId = sigmaShortId();
+                                    const fmt4a  = _inferSigmaFormat(lod.sigmaAgg, caption);
+                                    const lc4a   = { id: calcId, formula: lod.sigmaAgg, name: caption };
+                                    if (fmt4a) lc4a.format = fmt4a;
+                                    existingChild.columns.push(lc4a);
+                                    existingChild.order.push(calcId);
+                                    existingChild.groupings[0].calculations.push(calcId);
+                                } else {
+                                    const childId   = sigmaShortId();
+                                    const childCols = [], childOrder = [], groupByIds = [];
+                                    for (const di of dimInfos) {
+                                        const colId = sigmaShortId();
+                                        childCols.push({ id: colId, formula: '[' + factTableName + '/' + di.displayName + ']' });
+                                        childOrder.push(colId);
+                                        groupByIds.push(colId);
+                                    }
+                                    const aggColRefs  = lod.sigmaAgg.match(/\[([^\]]+)\]/g) || [];
+                                    const addedColNames = new Set(dimInfos.map(d => d.displayName.toUpperCase()));
+                                    for (const ref of aggColRefs) {
+                                        const colName = ref.replace(/^\[|\]$/g, '');
+                                        if (addedColNames.has(colName.toUpperCase())) continue;
+                                        addedColNames.add(colName.toUpperCase());
+                                        const refColId = sigmaShortId();
+                                        childCols.push({ id: refColId, formula: '[' + factTableName + '/' + colName + ']' });
+                                        childOrder.push(refColId);
+                                    }
+                                    const calcId = sigmaShortId();
+                                    const fmt4b  = _inferSigmaFormat(lod.sigmaAgg, caption);
+                                    const lc4b   = { id: calcId, formula: lod.sigmaAgg, name: caption };
+                                    if (fmt4b) lc4b.format = fmt4b;
+                                    childCols.push(lc4b);
+                                    childOrder.push(calcId);
+                                    const childEl = {
+                                        id: childId, kind: 'table',
+                                        name: factTableName + ' by ' + dimInfos.map(d => d.displayName).join(', '),
+                                        source: { elementId: factEl.id, kind: 'table' },
+                                        columns: childCols,
+                                        groupings: [{ id: sigmaShortId(), groupBy: groupByIds, calculations: [calcId] }],
+                                        order: childOrder,
+                                        _dimKey: dimKey
+                                    };
+                                    lodChildElements.push(childEl);
+                                }
+                                warnings.push('✅ LOD "' + caption + '" → child element');
+                                continue;
+                            }
+                        } else if (lod.lodType === 'FIXED' && lod.dims.length === 0) {
+                            if (!factEl.metrics) factEl.metrics = [];
+                            const fmt1 = _inferSigmaFormat(lod.sigmaAgg, caption);
+                            const m1   = { id: sigmaShortId(), formula: lod.sigmaAgg, name: caption };
+                            if (fmt1) m1.format = fmt1;
+                            factEl.metrics.push(m1);
+                            warnings.push('✅ LOD "' + caption + '" (table-scoped FIXED) → metric');
+                            continue;
+                        }
+                        if (lod.lodType === 'INCLUDE') warnings.push('⚠ LOD "' + caption + '" (INCLUDE) → add grouping manually in Sigma');
+                        else if (lod.lodType === 'EXCLUDE') warnings.push('⚠ LOD "' + caption + '" (EXCLUDE) → add grouping manually in Sigma');
+                        warnings.push('⛔ "' + caption + '" LOD not auto-converted — add manually.');
+                        continue;
+                    }
+
+                    if (tableauIsAggregate(formula)) {
+                        if (!factEl.metrics) factEl.metrics = [];
+                        const isComment = typeof sigmaFormula === 'string' && sigmaFormula.trim().startsWith('/*') && sigmaFormula.trim().endsWith('*/');
+                        if (!isComment) {
+                            const fmt2 = _inferSigmaFormat(sigmaFormula, caption);
+                            const m2   = { id: sigmaShortId(), formula: sigmaFormula, name: caption };
+                            if (fmt2) m2.format = fmt2;
+                            factEl.metrics.push(m2);
+                        } else {
+                            warnings.push('⛔ "' + caption + '" skipped — table calc cannot be saved as metric.');
+                        }
+                    } else {
+                        if (!factColIdMap[fieldKey.toUpperCase()]) {
+                            const id  = sigmaShortId();
+                            factColIdMap[fieldKey.toUpperCase()] = id;
+                            const fmt3 = _inferSigmaFormat(sigmaFormula, caption);
+                            const c3   = { id, formula: sigmaFormula, name: caption };
+                            if (fmt3) c3.format = fmt3;
+                            factEl.columns.push(c3);
+                            factEl.order.push(id);
+                            warnings.push('ℹ "' + caption + '" → calculated column: ' + String(sigmaFormula).slice(0,60));
+                        }
+                    }
+                } else if (caption !== fieldKey) {
+                    const found = allColIdMap[fieldKey.toUpperCase()];
+                    if (found) {
+                        const existingCol = found.el.columns.find(c => c.id === found.colId);
+                        // Strip Tableau disambiguation suffix from caption: "Product Key (PRODUCT_DIM (CSA...))" → "Product Key"
+                        const cleanCaption = caption.replace(/\s*\(.*\)$/, '').trim();
+                        if (existingCol && !existingCol.name) existingCol.name = cleanCaption || caption;
+                        // Virtual-connection columns have UUID keys in their formulas;
+                        // swap in the human-readable caption now that we have it.
+                        if (existingCol && /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(fieldKey)) {
+                            const useCaption = cleanCaption || caption;
+                            existingCol.formula = existingCol.formula.replace(/\/[^\]]+\]$/, '/' + useCaption + ']');
+                            // Also fix name if it still has the full disambiguation suffix
+                            if (existingCol.name && /\(.*\)$/.test(existingCol.name)) existingCol.name = useCaption;
+                            allColIdMap[useCaption.toUpperCase()] = found;
+                        }
+                    }
+                }
+            }
+
+            if (lodChildElements.length > 0) {
+                for (const child of lodChildElements) { delete child._dimKey; elements.push(child); }
+                warnings.push('ℹ ' + lodChildElements.length + ' LOD child element' + (lodChildElements.length!==1?'s':'') + ' created');
+            }
+            if (setColIds.length > 0) {
+                if (!factEl.folders) factEl.folders = [];
+                const setFolderId = sigmaShortId();
+                factEl.folders.push({ id: setFolderId, name: 'Sets', items: setColIds });
+                factEl.order.push(setFolderId);
+            }
+        }
+
+        for (const el of elements) {
+            for (let i = (el.columns || []).length - 1; i >= 0; i--) {
+                const c = el.columns[i];
+                if (!c.name || !c.formula) continue;
+                if (c.formula.match(/^\[[\w_]+\//)) continue;
+                if (/ - link\//i.test(c.formula)) {
+                    warnings.push('⚠ Removed "' + c.name + '" — deprecated link syntax.');
+                    el.columns.splice(i, 1);
+                    if (el.order) { const oi = el.order.indexOf(c.id); if (oi>=0) el.order.splice(oi,1); }
+                }
+            }
+            if (el.metrics) {
+                for (let i = el.metrics.length-1; i>=0; i--) {
+                    if (el.metrics[i].formula && / - link\//i.test(el.metrics[i].formula)) {
+                        warnings.push('⚠ Removed metric "' + el.metrics[i].name + '" — deprecated link syntax.');
+                        el.metrics.splice(i, 1);
+                    }
+                }
+            }
+        }
+
+        const controls = [];
+        for (const p of _tableauParsed.parameters) {
+            const controlId = sigmaDisplayName(p.name).replace(/\s+/g,'-');
+            if (p.domainType === 'list' && p.members.length > 0) {
+                controls.push({ kind:'control', controlId, id: sigmaShortId()+'con',
+                    controlType:'list', mode:'include', selectionMode:'single', values:[],
+                    source: { kind:'manual', valueType:'text', values: p.members } });
+                warnings.push('ℹ Parameter "' + p.name + '" → list control');
+            } else if (p.type === 'date' || p.type === 'datetime') {
+                controls.push({ kind:'control', controlId, id: sigmaShortId()+'con',
+                    controlType:'date-range', mode:'custom', includeNulls:'when-no-value-is-selected' });
+                warnings.push('ℹ Parameter "' + p.name + '" → date-range control');
+            } else {
+                controls.push({ kind:'control', controlId, id: sigmaShortId()+'con',
+                    controlType:'text', mode:'include', values:[] });
+                warnings.push('ℹ Parameter "' + p.name + '" → text control');
+            }
+        }
+
+        elements.forEach(el => {
+            if (el.metrics && el.metrics.length === 0) delete el.metrics;
+            if (el.relationships && el.relationships.length === 0) delete el.relationships;
+        });
+
+        const outputJson = {
+            schemaVersion: 1,
+            name: ds.name,
+            pages: [{ id: sigmaShortId(), name: 'Page 1', elements: [...controls, ...elements] }]
+        };
+
+        document.getElementById('tableauJsonOutput').value = JSON.stringify(outputJson, null, 2);
+
+        const warnBox = document.getElementById('tableauWarningBox');
+        if (warnings.length) {
+            warnBox.style.display = '';
+            warnBox.innerHTML = warnings.map(w => {
+                const cls = w.startsWith('✅') ? 'warn-line-ok'
+                          : w.startsWith('ℹ') ? 'warn-line-info'
+                          : w.startsWith('⚠') ? 'warn-line-warn'
+                          : 'warn-line-err';
+                return `<div class="${cls}">${escapeHtml(w)}</div>`;
+            }).join('');
+        } else {
+            warnBox.style.display = 'none';
+        }
+
+        const ec = elements.length, cc = controls.length, wc = warnings.length;
+        document.getElementById('tableauOutputStats').innerHTML = [
+            `<span class="badge">${ec} element${ec!==1?'s':''}</span>`,
+            cc ? `<span class="badge" style="color:var(--accent);">${cc} control${cc!==1?'s':''}</span>` : '',
+            wc ? `<span class="badge" style="color:var(--warning);">${wc} warning${wc!==1?'s':''}</span>` : ''
+        ].filter(Boolean).join('');
+
+        document.getElementById('tableauCopyBtn').disabled = false;
+        document.getElementById('tableauSaveBtn').disabled = false;
+        showToast('Converted "' + ds.name + '" → ' + ec + ' element' + (ec!==1?'s':''), 'success');
+
+    } catch(e) {
+        showToast('Conversion error: ' + e.message, 'error');
+        console.error(e);
+    } finally {
+        btn.disabled = false; btn.textContent = '📊 Convert to Sigma JSON';
+    }
+}
+
+function copyOutput() {
+    const val = document.getElementById('tableauJsonOutput').value;
+    if (!val) return;
+    navigator.clipboard.writeText(val).then(() => showToast('Copied', 'success'));
+}
+
+// ── Sigma save ────────────────────────────────────────────────────────────
+
+async function saveToSigma() {
+    const val = document.getElementById('tableauJsonOutput').value;
+    if (!val) { showToast('Convert a workbook first', 'warning'); return; }
+    if (!state.accessToken) { showToast('Connect to Sigma first', 'warning'); return; }
+
+    // Pre-fill modal name from JSON
+    try {
+        const obj = JSON.parse(val);
+        document.getElementById('saveModelName').value = obj.name || '';
+    } catch(e) {}
+
+    document.getElementById('saveConfirmBtn').disabled = true;
+    const modal = document.getElementById('saveModal');
+    modal.classList.add('active');
+    await loadSaveWorkspaces();
+}
+
+function closeSaveModal() {
+    document.getElementById('saveModal').classList.remove('active');
+}
+
+async function loadSaveWorkspaces() {
+    const sel = document.getElementById('saveWorkspace');
+    sel.innerHTML = '<option value="">Loading workspaces…</option>';
+    document.getElementById('saveFolder').innerHTML = '<option value="">Select a workspace first…</option>';
+    document.getElementById('saveFolder').disabled = true;
+    try {
+        const workspaces = await fetchAllPages(`${state.baseUrl}/v2/workspaces`);
+        workspaces.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+        sel.innerHTML = '<option value="">Select a workspace…</option>';
+        workspaces.forEach(ws => {
+            const o = document.createElement('option');
+            o.value = ws.workspaceId;
+            o.textContent = ws.name || ws.workspaceId;
+            sel.appendChild(o);
+        });
+    } catch(e) {
+        sel.innerHTML = '<option value="">Failed to load workspaces</option>';
+    }
+}
+
+async function onSaveWorkspaceChange() {
+    const wsId = document.getElementById('saveWorkspace').value;
+    const folderSel = document.getElementById('saveFolder');
+    document.getElementById('saveConfirmBtn').disabled = true;
+
+    if (!wsId) {
+        folderSel.innerHTML = '<option value="">Select a workspace first…</option>';
+        folderSel.disabled = true;
+        return;
+    }
+
+    folderSel.innerHTML = '<option value="">Loading folders…</option>';
+    folderSel.disabled = true;
+
+    try {
+        const resp = await sigmaFetch(`/v2/files?typeFilters=folder&parentId=${wsId}`);
+        const data = await resp.json();
+        const folders = data.entries || [];
+        folderSel.innerHTML = '';
+        const root = document.createElement('option');
+        root.value = wsId;
+        root.textContent = '📁 (Workspace Root)';
+        folderSel.appendChild(root);
+        folders.forEach(f => {
+            const o = document.createElement('option');
+            o.value = f.id || f.inodeId;
+            o.textContent = '📁 ' + (f.name || f.id);
+            folderSel.appendChild(o);
+        });
+        folderSel.disabled = false;
+        document.getElementById('saveConfirmBtn').disabled = false;
+    } catch(e) {
+        folderSel.innerHTML = '<option value="">Failed to load folders</option>';
+    }
+}
+
+async function confirmSave() {
+    const name     = document.getElementById('saveModelName').value.trim();
+    const folderId = document.getElementById('saveFolder').value;
+    if (!name)     { showToast('Enter a model name', 'warning'); return; }
+    if (!folderId) { showToast('Select a folder', 'warning'); return; }
+
+    const btn = document.getElementById('saveConfirmBtn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+
+    try {
+        const json     = JSON.parse(document.getElementById('tableauJsonOutput').value);
+        json.name      = name;
+        json.folderId  = folderId;
+
+        const resp = await sigmaFetch('/v2/dataModels/spec', {
+            method:  'POST',
+            body:    JSON.stringify(json)
+        });
+
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error((err.message || err.error || 'Unknown error') + ' (HTTP ' + resp.status + ')');
+        }
+
+        const result = await resp.json();
+        closeSaveModal();
+        showToast('Saved "' + name + '" to Sigma!', 'success');
+        console.log('Saved data model:', result);
+
+    } catch(e) {
+        showToast('Save failed: ' + e.message, 'error');
+    } finally {
+        btn.disabled = false; btn.textContent = 'Save';
+    }
+}
+</script>
+</body>
+</html>
