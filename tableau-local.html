@@ -1326,20 +1326,18 @@ function tableauBuildElements(rootRel, connection, connectionId, dbOverride, sch
             return;
         }
 
-        // Build a complete UUID→{caption, objectId} map from <metadata-record class='column'> elements.
-        // These live inside <connection><metadata-records> and carry ALL columns for every table,
-        // grouped by <object-id> whose value is "[TableFullName_HASH]".
-        const metaByTable = {}; // tableFullName → [{uuid, caption}]  (order preserved)
+        // Build UUID→caption map from <metadata-record class='column'> elements,
+        // keyed by the FULL object-id (with hex hash) so role-playing dimensions
+        // (two instances of the same table) remain distinguishable.
+        const metaByObjId = {}; // fullObjIdRaw → [{uuid, caption}]
         for (const mr of connection.querySelectorAll('metadata-records > metadata-record')) {
             if ((mr.getAttribute('class') || '') !== 'column') continue;
-            const uuid    = (mr.querySelector('remote-name')?.textContent  || '').trim();
-            const cap     = (mr.querySelector('caption')?.textContent      || '').trim();
+            const uuid     = (mr.querySelector('remote-name')?.textContent || '').trim();
+            const cap      = (mr.querySelector('caption')?.textContent     || '').trim();
             const objIdRaw = (mr.querySelector('object-id')?.textContent   || '').replace(/^\[|\]$/g, '');
             if (!uuid || !cap || !objIdRaw) continue;
-            // objIdRaw is "TABLE_FULL_NAME_HASH" — strip the trailing _HASH to get the table name
-            const tblName = objIdRaw.replace(/_[0-9A-Fa-f]{16,}$/, '');
-            if (!metaByTable[tblName]) metaByTable[tblName] = [];
-            metaByTable[tblName].push({ uuid, caption: cap });
+            if (!metaByObjId[objIdRaw]) metaByObjId[objIdRaw] = [];
+            metaByObjId[objIdRaw].push({ uuid, caption: cap });
         }
 
         // fullName = Tableau name with disambiguation (e.g. "ORDER_FACT (CSA.ORDER_FACT)")
@@ -1352,9 +1350,20 @@ function tableauBuildElements(rootRel, connection, connectionId, dbOverride, sch
             const cleanName = path[path.length - 1] || fullName;
             const columns = [], order = [], colIdMap = {};
 
-            // Use metadata-records as the source of truth for columns — they include every
-            // column in the table, not just the join keys referenced in the inline <columns> block.
-            const metaCols = metaByTable[fullName] || [];
+            // Match relation to metadata-records. Role-playing dimensions in Tableau append a
+            // trailing digit to the relation name (e.g. "DATE_DIM (CSA.DATE_DIM)1") but the
+            // metadata-record objIds share the same base prefix — take the Nth sorted candidate.
+            let matchingObjId = Object.keys(metaByObjId).find(k => k === fullName || k.startsWith(fullName + '_'));
+            if (!matchingObjId) {
+                const roleM = fullName.match(/^([\s\S]+?)(\d+)$/);
+                if (roleM) {
+                    const base = roleM[1];
+                    const idx  = parseInt(roleM[2], 10);
+                    const cands = Object.keys(metaByObjId).filter(k => k === base || k.startsWith(base + '_')).sort();
+                    matchingObjId = cands[idx];
+                }
+            }
+            const metaCols = matchingObjId ? metaByObjId[matchingObjId] : [];
             for (const { uuid, caption } of metaCols) {
                 const cleanCaption = caption.replace(/\s*\(.*\)$/, '').trim(); // strip disambiguation
                 const idKey = uuid.toUpperCase();
@@ -1386,7 +1395,7 @@ function tableauBuildElements(rootRel, connection, connectionId, dbOverride, sch
             const el = { id: sigmaShortId(), kind: 'table',
                 source: { connectionId, kind: 'warehouse-table', path },
                 columns, metrics: [], order };
-            elementMap[fullName] = { element: el, colIdMap, cleanName };
+            elementMap[fullName] = { element: el, colIdMap, cleanName, objId: matchingObjId || null };
             elements.push(el);
         }
 
@@ -1402,9 +1411,12 @@ function tableauBuildElements(rootRel, connection, connectionId, dbOverride, sch
                 const firstObjId  = firstEp.getAttribute('object-id')  || '';
                 const secondObjId = secondEp.getAttribute('object-id') || '';
 
-                // Object-ids are "TableName_HASH" — match by prefix
-                const firstTable  = Object.keys(elementMap).find(n => firstObjId.startsWith(n + '_'))  || '';
-                const secondTable = Object.keys(elementMap).find(n => secondObjId.startsWith(n + '_')) || '';
+                // Two-pass lookup: exact stored objId match first (handles role-playing dims),
+                // then fall back to prefix so tables without metadata-records still resolve.
+                const findTableKey = oid => Object.keys(elementMap).find(n => elementMap[n].objId === oid)
+                    || Object.keys(elementMap).find(n => oid.startsWith(n + '_')) || '';
+                const firstTable  = findTableKey(firstObjId);
+                const secondTable = findTableKey(secondObjId);
                 const firstEntry  = elementMap[firstTable];
                 const secondEntry = elementMap[secondTable];
                 if (!firstEntry || !secondEntry) {
