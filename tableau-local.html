@@ -2365,6 +2365,8 @@ function runPrepConversion() {
         return;
     }
     const { sigmaModel, warnings, stats } = result;
+    // Sigma's POST /v2/dataModels/spec requires schemaVersion at the root.
+    sigmaModel.schemaVersion = 1;
     document.getElementById('tableauJsonOutput').value = JSON.stringify(sigmaModel, null, 2);
     const elements = sigmaModel.pages[0].elements;
     const totalCols = elements.reduce((s, e) => s + (e.columns?.length || 0), 0);
@@ -2987,7 +2989,7 @@ function runPrepConversion() {
             const fieldMappings = action.namespaceFieldMappings || [];
             const unionEl = {
                 id: elementId, kind: 'table', name: sigmaDisplayName(n.name || 'Union'),
-                source: { connectionId, kind: 'union', inputs: upstreamStates.map(s => ({ elementId: s.element.id })) },
+                source: { connectionId, kind: 'union', sources: upstreamStates.map(s => ({ kind: 'table', elementId: s.element.id })), matches: [] },
                 columns: [], metrics: [], order: [],
             };
             const canon = upstreamStates[0];
