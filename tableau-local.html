@@ -405,9 +405,13 @@
       </div>
     </div>
 
-    <!-- Workbook list -->
+    <!-- Workbook / Flow list -->
     <div class="section" id="tsWorkbookSection" style="display:none;">
-      <div class="section-title">Workbooks</div>
+      <div style="display:flex;gap:6px;margin-bottom:8px;">
+        <button class="btn btn-secondary btn-sm" id="tsTypeWbBtn" onclick="setTsItemType('workbooks')" style="flex:1;">📊 Workbooks</button>
+        <button class="btn btn-secondary btn-sm" id="tsTypeFlowBtn" onclick="setTsItemType('flows')" style="flex:1;">🔧 Flows</button>
+      </div>
+      <div class="section-title" id="tsItemSectionTitle">Workbooks</div>
       <div class="workbook-list" id="tsWorkbookList">
         <div class="wb-empty">No workbooks loaded</div>
       </div>
@@ -430,10 +434,10 @@
           ondragleave="this.classList.remove('drag-over')"
           ondrop="handleTableauDrop(event)">
           <div class="drop-zone-icon">📂</div>
-          <div class="drop-zone-title">.twb / .twbx / .tds / .tdsx</div>
-          <div class="drop-zone-sub">Click to browse or drag &amp; drop</div>
+          <div class="drop-zone-title">.twb · .twbx · .tds · .tdsx · .tfl · .tflx</div>
+          <div class="drop-zone-sub">Click to browse or drag &amp; drop (multiple OK)</div>
         </div>
-        <input type="file" id="tableauFileInput" accept=".twb,.twbx,.tds,.tdsx" style="display:none" onchange="handleTableauFileInput(event)">
+        <input type="file" id="tableauFileInput" accept=".twb,.twbx,.tds,.tdsx,.tfl,.tflx" multiple style="display:none" onchange="handleTableauFileInput(event)">
         <div id="tableauFileList" style="display:flex;flex-direction:column;gap:4px;"></div>
       </div>
     </details>
@@ -598,10 +602,17 @@ const tsState = {
     siteId:   null,
     siteName: null,
     workbooks: [],
-    selectedId: null
+    flows:      [],
+    datasources: [],
+    selectedId:   null,
+    selectedType: null,    // 'workbook' | 'flow'
+    itemType:     'workbooks'   // 'workbooks' | 'flows' (which list is showing)
 };
 
 let _tableauParsed = null;
+let _prepFlowJson  = null;   // Tableau Prep flow JSON (when a .tfl is loaded)
+let _prepTdsFiles  = [];     // [{ name, content }] companion .tds XMLs (auto-fetched or uploaded)
+let _prepLoadedFromName = ''; // friendly label for the loaded flow
 
 // ── Toast ─────────────────────────────────────────────────────────────────
 
@@ -641,6 +652,10 @@ function sigmaDisplayName(s, friendly) {
     if (useFriendly === false) return s || '';
     const words = (s || '').toLowerCase().split('_');
     return words.map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
+function sigmaColFormula(tableName, identifier) {
+    return `[${tableName}/${sigmaDisplayName(identifier)}]`;
 }
 
 function escapeHtml(text) {
@@ -877,6 +892,7 @@ async function tsConnect() {
 
         await tsListWorkbooks();
         document.getElementById('tsWorkbookSection').style.display = '';
+        setTsItemType('workbooks');
 
     } catch(e) {
         setTsStatus('Connection failed', 'error');
@@ -941,6 +957,8 @@ function selectWorkbook(id, el) {
 
 async function tsLoadSelected() {
     if (!tsState.selectedId) return;
+    // Dispatch to flow loader when the user selected a flow
+    if (tsState.selectedType === 'flow') return tsLoadSelectedFlow();
     const btn = document.getElementById('tsLoadBtn');
     btn.disabled = true; btn.textContent = '⬇ Downloading…';
 
@@ -995,45 +1013,263 @@ async function tsLoadSelected() {
     }
 }
 
+// ── Tableau Server: Flow listing + .tfl download + companion .tdsx auto-fetch ──
+
+function setTsItemType(type) {
+    if (type !== 'workbooks' && type !== 'flows') return;
+    tsState.itemType = type;
+    tsState.selectedId = null;
+    tsState.selectedType = null;
+    document.getElementById('tsLoadBtn').disabled = true;
+    document.getElementById('tsItemSectionTitle').textContent = type === 'workbooks' ? 'Workbooks' : 'Flows';
+    document.getElementById('tsLoadBtn').textContent = type === 'workbooks' ? '⬇ Load Selected Workbook' : '⬇ Load Selected Flow';
+    // Visual: highlight active tab
+    document.getElementById('tsTypeWbBtn').style.background = type === 'workbooks' ? 'var(--accent)' : '';
+    document.getElementById('tsTypeFlowBtn').style.background = type === 'flows' ? 'var(--accent)' : '';
+    if (!tsState.token) return;
+    if (type === 'flows') tsListFlows().catch(e => showToast('List flows failed: ' + e.message, 'error'));
+    else tsListWorkbooks().catch(e => showToast('List workbooks failed: ' + e.message, 'error'));
+}
+
+async function tsListFlows() {
+    const url = `/api/tableau/3.21/sites/${tsState.siteId}/flows?pageSize=1000`;
+    const resp = await fetch(url, { headers: { 'X-Tableau-Auth': tsState.token, 'Accept': 'application/json' } });
+    if (!resp.ok) throw new Error('Failed to list flows: HTTP ' + resp.status);
+    const data = await resp.json();
+    tsState.flows = (data.flows && data.flows.flow) || [];
+    renderFlowList(tsState.flows);
+}
+
+function renderFlowList(flows) {
+    const container = document.getElementById('tsWorkbookList');
+    if (flows.length === 0) {
+        container.innerHTML = '<div class="wb-empty">No flows found</div>';
+        return;
+    }
+    let html = `<input class="wb-search" placeholder="🔍  Search flows…" oninput="filterFlows(this.value)">`;
+    for (const f of flows) {
+        const project = f.project ? f.project.name : '';
+        const owner   = f.owner   ? f.owner.name   : '';
+        const meta    = [owner, project ? `📁 ${project}` : ''].filter(Boolean).join(' · ');
+        html += `<div class="wb-item" data-id="${escapeHtml(f.id)}" data-name="${escapeHtml(f.name || '')}"
+                      onclick="selectFlow('${escapeHtml(f.id)}', this)">
+                   <span class="wb-icon">🔧</span>
+                   <span class="wb-info">
+                     <span class="wb-name">${escapeHtml(f.name || f.id)}</span>
+                     ${meta ? `<span class="wb-meta">${escapeHtml(meta)}</span>` : ''}
+                   </span>
+                 </div>`;
+    }
+    container.innerHTML = html;
+}
+
+function filterFlows(query) {
+    const q = query.toLowerCase();
+    for (const item of document.querySelectorAll('#tsWorkbookList .wb-item')) {
+        const name = (item.dataset.name || '').toLowerCase();
+        item.style.display = name.includes(q) ? '' : 'none';
+    }
+}
+
+function selectFlow(id, el) {
+    document.querySelectorAll('#tsWorkbookList .wb-item').forEach(i => i.classList.remove('selected'));
+    el.classList.add('selected');
+    tsState.selectedId = id;
+    tsState.selectedType = 'flow';
+    document.getElementById('tsLoadBtn').disabled = false;
+}
+
+// Hook selectWorkbook to also set selectedType so tsLoadSelected can dispatch.
+const _originalSelectWorkbook = selectWorkbook;
+selectWorkbook = function(id, el) {
+    _originalSelectWorkbook(id, el);
+    tsState.selectedType = 'workbook';
+};
+
+async function tsLoadSelectedFlow() {
+    if (!tsState.selectedId) return;
+    const btn = document.getElementById('tsLoadBtn');
+    btn.disabled = true; btn.textContent = '⬇ Downloading flow…';
+    try {
+        const url = `/api/tableau/3.21/sites/${tsState.siteId}/flows/${tsState.selectedId}/content`;
+        const resp = await fetch(url, { headers: { 'X-Tableau-Auth': tsState.token } });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const ab = await resp.arrayBuffer();
+        const zip = await JSZip.loadAsync(ab);
+        const flowFile = zip.file('flow');
+        if (!flowFile) throw new Error('Archive does not contain a "flow" member');
+        _prepFlowJson = await flowFile.async('string');
+        const sel = document.querySelector('#tsWorkbookList .wb-item.selected');
+        _prepLoadedFromName = (sel ? sel.dataset.name : '') || 'flow';
+
+        // Reset companion files for this load — fresh fetch
+        _prepTdsFiles = [];
+
+        // Auto-fetch companion .tdsx for any LoadSqlProxy
+        btn.textContent = '⬇ Auto-fetching .tds…';
+        await tsAutoFetchTdsForFlow(_prepFlowJson);
+
+        // Show file chips so the user sees what was loaded
+        renderTableauFileList();
+
+        // Reset workbook state and run the prep converter immediately
+        _tableauParsed = null;
+        runTableauConversion();
+        showToast(`Loaded flow "${_prepLoadedFromName}"${_prepTdsFiles.length ? ` + ${_prepTdsFiles.length} companion .tds file${_prepTdsFiles.length !== 1 ? 's' : ''}` : ''}`, 'success');
+    } catch(e) {
+        showToast('Flow load failed: ' + e.message, 'error');
+    } finally {
+        btn.disabled = false; btn.textContent = '⬇ Load Selected Flow';
+    }
+}
+
+// Scan the flow JSON for LoadSqlProxy / LoadPublishedDataSource inputs, find matching
+// published datasources on the Tableau Server by name, download each as .tdsx, extract
+// the inner .tds XML, and stash in _prepTdsFiles. The Prep converter then resolves the
+// stub elements to real warehouse-table or Custom SQL elements.
+async function tsAutoFetchTdsForFlow(flowJson) {
+    let flow;
+    try { flow = JSON.parse(flowJson); } catch { return; }
+    const proxyNames = new Set();
+    function walk(nodes) {
+        if (!nodes) return;
+        for (const n of Object.values(nodes)) {
+            const t = n.nodeType || '';
+            if (t === '.v2019_3_1.LoadSqlProxy' || t === 'LoadPublishedDataSource') {
+                const dsName = n.connectionAttributes?.datasourceName || n.name;
+                if (dsName) proxyNames.add(dsName.toLowerCase());
+            }
+            if (n.loomContainer && n.loomContainer.nodes) walk(n.loomContainer.nodes);
+        }
+    }
+    walk(flow.nodes);
+    if (proxyNames.size === 0) return;
+
+    // List all datasources on the site (cache in tsState if not already fetched)
+    if (tsState.datasources.length === 0) {
+        const url = `/api/tableau/3.21/sites/${tsState.siteId}/datasources?pageSize=1000`;
+        const resp = await fetch(url, { headers: { 'X-Tableau-Auth': tsState.token, 'Accept': 'application/json' } });
+        if (resp.ok) {
+            const data = await resp.json();
+            tsState.datasources = (data.datasources && data.datasources.datasource) || [];
+        }
+    }
+
+    // Match each proxy name to a datasource (case-insensitive on .name)
+    for (const proxyName of proxyNames) {
+        const ds = tsState.datasources.find(d => (d.name || '').toLowerCase() === proxyName);
+        if (!ds) {
+            showToast(`No matching published datasource for "${proxyName}" — Custom SQL stub will be used`, 'warning');
+            continue;
+        }
+        try {
+            const dsUrl = `/api/tableau/3.21/sites/${tsState.siteId}/datasources/${ds.id}/content`;
+            const dsResp = await fetch(dsUrl, { headers: { 'X-Tableau-Auth': tsState.token } });
+            if (!dsResp.ok) {
+                showToast(`Failed to download "${ds.name}" .tdsx — HTTP ${dsResp.status}`, 'warning');
+                continue;
+            }
+            const dsAb = await dsResp.arrayBuffer();
+            // The endpoint may return either a .tdsx (zip) or a .tds (xml) depending on the server
+            let xml;
+            try {
+                const dsZip = await JSZip.loadAsync(dsAb);
+                let tdsFile = null;
+                dsZip.forEach((p, f) => { if (!tdsFile && /\.tds$/i.test(p) && !f.dir) tdsFile = f; });
+                if (tdsFile) xml = await tdsFile.async('string');
+            } catch { /* not a zip — treat as raw xml */ }
+            if (!xml) xml = new TextDecoder().decode(dsAb);
+            _prepTdsFiles.push({ name: `${ds.name}.tds`, content: xml });
+        } catch (e) {
+            showToast(`Failed to fetch .tdsx for "${ds.name}": ${e.message}`, 'warning');
+        }
+    }
+}
+
 // ── File upload (manual fallback) ─────────────────────────────────────────
 
-function handleTableauFileInput(event) {
-    const file = event.target.files[0];
-    if (!file) return;
-    processTableauFile(file);
+async function handleTableauFileInput(event) {
+    const files = Array.from(event.target.files);
+    if (!files.length) return;
+    for (const f of files) await processTableauFile(f, true);
+    if (_prepFlowJson) runTableauConversion();
+    renderTableauFileList();
     event.target.value = '';
 }
 
-function handleTableauDrop(event) {
+async function handleTableauDrop(event) {
     event.preventDefault();
     document.getElementById('tableauDropZone').classList.remove('drag-over');
-    const file = event.dataTransfer.files[0];
-    if (!file) return;
-    processTableauFile(file);
+    const files = Array.from(event.dataTransfer.files);
+    if (!files.length) return;
+    for (const f of files) await processTableauFile(f, true);
+    if (_prepFlowJson) runTableauConversion();
+    renderTableauFileList();
 }
 
-async function processTableauFile(file) {
+async function processTableauFile(file, deferConvert) {
     const name = file.name.toLowerCase();
-    if (name.endsWith('.twb') || name.endsWith('.tds')) {
-        const text = await file.text();
-        ingestTableauXml(text, file.name);
-    } else if (name.endsWith('.twbx') || name.endsWith('.tdsx')) {
-        try {
+    try {
+        if (name.endsWith('.twb')) {
+            const text = await file.text();
+            ingestTableauXml(text, file.name);
+        } else if (name.endsWith('.tds')) {
+            // .tds drop: treat as a companion file for any active Prep flow,
+            // and ALSO try to ingest as a standalone Tableau datasource.
+            const text = await file.text();
+            _prepTdsFiles.push({ name: file.name, content: text });
+            ingestTableauXml(text, file.name);
+        } else if (name.endsWith('.twbx')) {
             const ab = await file.arrayBuffer();
             const zip = await JSZip.loadAsync(ab);
             let xmlFile = null;
-            zip.forEach((path, f) => {
-                if (!xmlFile && (path.endsWith('.twb') || path.endsWith('.tds'))) xmlFile = f;
-            });
-            if (!xmlFile) throw new Error('No .twb/.tds inside archive');
+            zip.forEach((p, f) => { if (!xmlFile && p.endsWith('.twb')) xmlFile = f; });
+            if (!xmlFile) throw new Error('No .twb inside .twbx archive');
             const xml = await xmlFile.async('string');
             ingestTableauXml(xml, file.name);
-        } catch(e) {
-            showToast('Could not read file: ' + e.message, 'error');
+        } else if (name.endsWith('.tdsx')) {
+            const ab = await file.arrayBuffer();
+            const zip = await JSZip.loadAsync(ab);
+            let xmlFile = null;
+            zip.forEach((p, f) => { if (!xmlFile && p.endsWith('.tds')) xmlFile = f; });
+            if (!xmlFile) throw new Error('No .tds inside .tdsx archive');
+            const xml = await xmlFile.async('string');
+            _prepTdsFiles.push({ name: file.name, content: xml });
+            ingestTableauXml(xml, file.name);
+        } else if (name.endsWith('.tfl') || name.endsWith('.tflx')) {
+            // Tableau Prep flow archive — extract `flow` JSON
+            const ab = await file.arrayBuffer();
+            const zip = await JSZip.loadAsync(ab);
+            const flowFile = zip.file('flow');
+            if (!flowFile) throw new Error('Archive does not contain a "flow" member');
+            _prepFlowJson = await flowFile.async('string');
+            _prepLoadedFromName = file.name;
+            _tableauParsed = null; // dispatch to prep converter
+            document.getElementById('tableauConvertBtn').disabled = false;
+        } else {
+            showToast(`Unsupported file type: ${file.name}`, 'error');
+            return;
         }
-    } else {
-        showToast('Unsupported file type', 'error');
+    } catch (e) {
+        showToast(`Could not read ${file.name}: ${e.message}`, 'error');
     }
+    if (!deferConvert) {
+        if (_prepFlowJson) runTableauConversion();
+        renderTableauFileList();
+    }
+}
+
+function renderTableauFileList() {
+    const listEl = document.getElementById('tableauFileList');
+    listEl.innerHTML = '';
+    const addChip = (icon, label) => {
+        const chip = document.createElement('div');
+        chip.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 8px;background:var(--bg-tertiary);border-radius:6px;font-size:11px;';
+        chip.innerHTML = `<span>${icon}</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${label}">${escapeHtml(label)}</span>`;
+        listEl.appendChild(chip);
+    };
+    if (_prepFlowJson) addChip('🔧', _prepLoadedFromName || 'flow.tfl');
+    for (const f of _prepTdsFiles) addChip('📑', f.name);
 }
 
 function ingestTableauXml(xml, filename) {
@@ -1600,8 +1836,10 @@ function tableauCollectTables(rel, tables) {
 // ── Main conversion ───────────────────────────────────────────────────────
 
 function runTableauConversion() {
+    // Dispatch to Tableau Prep converter when a .tfl was loaded
+    if (_prepFlowJson) return runPrepConversion();
     if (!_tableauParsed || _tableauParsed.datasources.length === 0) {
-        showToast('Load a Tableau workbook first', 'warning'); return;
+        showToast('Load a Tableau workbook or flow first', 'warning'); return;
     }
     const btn = document.getElementById('tableauConvertBtn');
     btn.disabled = true; btn.textContent = '⏳ Converting…';
@@ -1655,6 +1893,21 @@ function runTableauConversion() {
                     if (fm) displayNameMap[fm[1].toUpperCase()] = { colId: c.id, el };
                 });
             });
+            // Also index by raw UUID from metadata-records so FIXED LODs that reference
+            // UUID column names (virtual connection datasources) can resolve their dims.
+            if (connection) {
+                for (const mr of connection.querySelectorAll('metadata-records > metadata-record')) {
+                    if ((mr.getAttribute('class') || '') !== 'column') continue;
+                    const uuid = (mr.querySelector('remote-name')?.textContent || '').trim();
+                    const cap  = (mr.querySelector('caption')?.textContent || '').trim();
+                    if (!uuid || !cap) continue;
+                    const cleanCap = cap.replace(/\s*\(.*\)$/, '').trim();
+                    const existing = displayNameMap[cleanCap.toUpperCase()];
+                    if (existing && !displayNameMap[uuid.toUpperCase()]) {
+                        displayNameMap[uuid.toUpperCase()] = existing;
+                    }
+                }
+            }
 
             const lodChildElements = [];
             const setColIds = [];
@@ -2090,6 +2343,1721 @@ async function confirmSave() {
         btn.disabled = false; btn.textContent = 'Save';
     }
 }
+
+// ── Tableau Prep dispatcher (output to existing tableauJsonOutput textarea) ─────
+function runPrepConversion() {
+    if (!_prepFlowJson) {
+        showToast('Load a Tableau Prep flow first', 'warning'); return;
+    }
+    let connectionId = document.getElementById('tableauConnectionId').value.trim() || '<CONNECTION_ID>';
+    state.useFriendlyNames = isConnectionFriendly(connectionId);
+    const database = document.getElementById('tableauDatabase').value.trim();
+    const schema   = document.getElementById('tableauSchema').value.trim();
+    _usedIds.clear();
+    let result;
+    try {
+        result = convertTableauPrepToSigma(_prepFlowJson, connectionId, {
+            database, schema, tableMapping: {}, tdsFiles: _prepTdsFiles
+        });
+    } catch (e) {
+        document.getElementById('tableauJsonOutput').value = '// Conversion error:\n// ' + e.message;
+        showToast('Prep conversion error: ' + e.message, 'error');
+        return;
+    }
+    const { sigmaModel, warnings, stats } = result;
+    document.getElementById('tableauJsonOutput').value = JSON.stringify(sigmaModel, null, 2);
+    const elements = sigmaModel.pages[0].elements;
+    const totalCols = elements.reduce((s, e) => s + (e.columns?.length || 0), 0);
+    const totalRels = elements.reduce((s, e) => s + (e.relationships?.length || 0), 0);
+    const inputStatsEl = document.getElementById('tableauInputStats');
+    if (inputStatsEl) inputStatsEl.innerHTML = `<span class="badge">📦 ${stats.inputs} input${stats.inputs !== 1 ? 's' : ''}</span> <span class="badge">${stats.joins} join${stats.joins !== 1 ? 's' : ''}</span> <span class="badge">${stats.aggregates} aggregate${stats.aggregates !== 1 ? 's' : ''}</span>`;
+    document.getElementById('tableauOutputStats').innerHTML = `<span class="badge">🔧 ${elements.length} element${elements.length !== 1 ? 's' : ''}</span> <span class="badge">${totalCols} columns</span>${totalRels > 0 ? ` <span class="badge">${totalRels} relationship${totalRels !== 1 ? 's' : ''}</span>` : ''}`;
+    const allWarnings = [...warnings];
+    if (!connectionId || connectionId === '<CONNECTION_ID>') allWarnings.unshift('⚠ Connection ID not set — select a Sigma connection or edit the JSON before saving');
+    const warnBox = document.getElementById('tableauWarningBox');
+    if (allWarnings.length) {
+        warnBox.style.display = '';
+        warnBox.innerHTML = allWarnings.map(w => '<div>' + escapeHtml(w) + '</div>').join('');
+    } else {
+        warnBox.style.display = 'none';
+    }
+    document.getElementById('tableauCopyBtn').disabled = false;
+    document.getElementById('tableauSaveBtn').disabled = false;
+    showToast(`Converted ${stats.inputs} input${stats.inputs !== 1 ? 's' : ''} → ${elements.length} element${elements.length !== 1 ? 's' : ''}`, 'success');
+}
+
+        // ── Tableau Prep conversion logic (mirrors sigma-data-model-mcp/src/tableau-prep.ts) ──
+
+        function convertTableauPrepToSigma(flowJsonText, connectionId, opts = {}) {
+            const { database = '', schema = '', tableMapping = {}, tdsFiles = [] } = opts;
+            const dbOverride = database.trim().toUpperCase();
+            const schemaOverride = schema.trim().toUpperCase();
+            const conn = connectionId || '<CONNECTION_ID>';
+
+            // Parse companion .tds files into a name → resolved-connection index
+            const tdsIndex = new Map();
+            for (const f of tdsFiles) {
+                for (const r of _prepParseTds(f.content)) {
+                    if (r.caption) tdsIndex.set(r.caption.toLowerCase(), r);
+                    if (r.name && !tdsIndex.has(r.name.toLowerCase())) tdsIndex.set(r.name.toLowerCase(), r);
+                }
+            }
+
+            let flow;
+            try { flow = JSON.parse(flowJsonText); }
+            catch (e) { throw new Error('Tableau Prep flow JSON parse error: ' + e.message); }
+            if (!flow.nodes || typeof flow.nodes !== 'object') throw new Error('Invalid Tableau Prep flow: missing nodes object');
+
+            const warnings = [];
+            const stats = { nodes: 0, inputs: 0, transforms: 0, joins: 0, unions: 0, aggregates: 0, outputs: 0,
+                            skipped: 0, calculatedColumns: 0, filters: 0, renames: 0, removedColumns: 0, elements: 0, relationships: 0 };
+
+            // Step 1: flatten containers
+            const flatNodes = {};
+            _prepFlattenContainers(flow.nodes, flatNodes, warnings);
+
+            // Step 2: incoming-edge map
+            const incoming = new Map();
+            for (const [nid, n] of Object.entries(flatNodes)) {
+                for (const ne of (n.nextNodes || [])) {
+                    if (!incoming.has(ne.nextNodeId)) incoming.set(ne.nextNodeId, []);
+                    incoming.get(ne.nextNodeId).push({
+                        from: nid,
+                        namespace: ne.namespace || 'Default',
+                        nextNamespace: ne.nextNamespace || 'Default',
+                    });
+                }
+            }
+
+            // Step 3: walk DAG
+            const elements = [];
+            const chainState = new Map();
+            const visited = new Set();
+            const queue = [];
+            for (const id of (flow.initialNodes || [])) if (flatNodes[id]) queue.push(id);
+            for (const [nid, n] of Object.entries(flatNodes)) {
+                if (n.baseType === 'input' && !queue.includes(nid)) queue.push(nid);
+            }
+
+            while (queue.length > 0) {
+                const nid = queue.shift();
+                if (visited.has(nid)) continue;
+                const n = flatNodes[nid];
+                if (!n) continue;
+                stats.nodes++;
+                const preds = incoming.get(nid) || [];
+                if (n.baseType !== 'input' && !preds.every(p => visited.has(p.from))) { queue.push(nid); continue; }
+                visited.add(nid);
+
+                if (n.baseType === 'input') {
+                    const state = _prepProcessInputNode(n, conn, dbOverride, schemaOverride, tableMapping, tdsIndex, warnings);
+                    stats.inputs++;
+                    for (const action of (n.actions || [])) _prepApplyTransformAction(action, state, warnings, stats);
+                    chainState.set(nid, state);
+                    for (const ne of (n.nextNodes || [])) queue.push(ne.nextNodeId);
+                } else if (n.baseType === 'transform' || n.baseType === 'output') {
+                    const upstream = preds[0];
+                    if (!upstream) { warnings.push(`⚠ Transform node "${n.name || nid}" has no predecessor — skipped.`); continue; }
+                    const state = chainState.get(upstream.from);
+                    if (!state) { warnings.push(`⚠ Transform node "${n.name || nid}" upstream chain missing — skipped.`); continue; }
+                    if (n.baseType === 'output') {
+                        stats.outputs++;
+                        if (!state.finalized) _prepFinalizeChain(state, elements);
+                        continue;
+                    }
+                    _prepApplyTransformAction(n, state, warnings, stats);
+                    chainState.set(nid, state);
+                    for (const ne of (n.nextNodes || [])) queue.push(ne.nextNodeId);
+                } else if (n.baseType === 'superNode') {
+                    const t = n.nodeType || '';
+                    let st = null;
+                    if (t.includes('SuperJoin')) { st = _prepProcessSuperJoin(n, preds, chainState, elements, warnings); stats.joins++; if (st) stats.relationships++; }
+                    else if (t.includes('SuperUnion')) { st = _prepProcessSuperUnion(n, preds, chainState, elements, conn, warnings); stats.unions++; }
+                    else if (t.includes('SuperAggregate')) { st = _prepProcessSuperAggregate(n, preds, chainState, elements, warnings); stats.aggregates++; }
+                    else { warnings.push(`ℹ SuperNode type "${t}" not recognized — skipped.`); stats.skipped++; }
+                    if (st) chainState.set(nid, st);
+                    for (const ne of (n.nextNodes || [])) queue.push(ne.nextNodeId);
+                } else {
+                    stats.skipped++;
+                    warnings.push(`ℹ Node "${n.name || nid}" (${n.nodeType}, baseType=${n.baseType}) — skipped.`);
+                    for (const ne of (n.nextNodes || [])) queue.push(ne.nextNodeId);
+                }
+            }
+            for (const state of chainState.values()) {
+                if (state.finalized) continue;
+                if (state.element.columns.length === 0 && state.element.source?.kind !== 'sql') continue;
+                _prepFinalizeChain(state, elements);
+            }
+
+            stats.elements = elements.length;
+            if (!connectionId) warnings.unshift('⚠ Connection ID not set — update in JSON before saving to Sigma');
+
+            return {
+                sigmaModel: { name: 'Tableau Prep Flow', pages: [{ id: sigmaShortId(), name: 'Page 1', elements }] },
+                warnings,
+                stats: {
+                    nodes: stats.nodes, inputs: stats.inputs, joins: stats.joins, unions: stats.unions,
+                    aggregates: stats.aggregates, outputs: stats.outputs, skipped: stats.skipped,
+                    elements: stats.elements,
+                    columns: elements.reduce((s, e) => s + (e.columns?.length ?? 0), 0),
+                    metrics: elements.reduce((s, e) => s + (e.metrics?.length ?? 0), 0),
+                    relationships: stats.relationships,
+                    calculatedColumns: stats.calculatedColumns, filters: stats.filters,
+                    renames: stats.renames, removedColumns: stats.removedColumns,
+                },
+            };
+        }
+
+        function _prepFlattenContainers(rootNodes, outFlat, warnings) {
+            const rewrites = [];
+            function pass(nodes) {
+                for (const [nid, n] of Object.entries(nodes)) {
+                    if (n.nodeType === '.v1.Container' && n.loomContainer) {
+                        const inner = n.loomContainer.nodes || {};
+                        pass(inner);
+                        const innerIds = Object.keys(inner);
+                        const targeted = new Set();
+                        for (const inN of Object.values(inner)) for (const ne of inN.nextNodes || []) targeted.add(ne.nextNodeId);
+                        let firstInner = (n.loomContainer.initialNodes || [])[0] || null;
+                        if (!firstInner) firstInner = innerIds.find(id => !targeted.has(id)) || innerIds[0] || null;
+                        const lastInner = innerIds.filter(id => !(inner[id].nextNodes || []).length);
+                        rewrites.push({ containerId: nid, firstInnerId: firstInner, lastInnerIds: lastInner, outgoing: n.nextNodes || [] });
+                    } else if (!outFlat[nid]) {
+                        outFlat[nid] = n;
+                    }
+                }
+            }
+            pass(rootNodes);
+            for (const rw of rewrites) {
+                if (!rw.firstInnerId && !rw.lastInnerIds.length) { warnings.push(`ℹ Container "${rw.containerId}" was empty — dropped.`); continue; }
+                for (const n of Object.values(outFlat)) {
+                    if (!n.nextNodes) continue;
+                    for (const ne of n.nextNodes) if (ne.nextNodeId === rw.containerId && rw.firstInnerId) ne.nextNodeId = rw.firstInnerId;
+                }
+                for (const lastId of rw.lastInnerIds) {
+                    const lastN = outFlat[lastId]; if (!lastN) continue;
+                    lastN.nextNodes = [...(lastN.nextNodes || []), ...rw.outgoing];
+                }
+            }
+        }
+
+        // Lightweight .tds/.tdsx XML parser — extracts datasource caption/name and the
+        // first <relation> (table or text). Uses regex since the structure is reliable
+        // and avoiding fast-xml-parser keeps the browser bundle slim.
+        function _prepParseTds(xml) {
+            if (typeof xml !== 'string' || !xml.trim()) return [];
+            const out = [];
+            // Match each <datasource ...>...</datasource> block
+            const dsRe = /<datasource\b([^>]*)>([\s\S]*?)<\/datasource>/g;
+            let m;
+            while ((m = dsRe.exec(xml)) !== null) {
+                const attrs = m[1];
+                const body = m[2];
+                const captionMatch = attrs.match(/\bcaption\s*=\s*['"]([^'"]+)['"]/);
+                const nameMatch = attrs.match(/\bname\s*=\s*['"]([^'"]+)['"]/);
+                const caption = captionMatch ? captionMatch[1] : '';
+                const name = nameMatch ? nameMatch[1] : caption;
+                const r = { caption, name };
+
+                // Find first <relation ...>...</relation> or self-closing <relation ... />
+                const relMatch = body.match(/<relation\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relation>)/);
+                if (relMatch) {
+                    const relAttrs = relMatch[1];
+                    const relBody = (relMatch[2] || '').trim();
+                    const tMatch = relAttrs.match(/\btype\s*=\s*['"]([^'"]+)['"]/);
+                    const tableMatch = relAttrs.match(/\btable\s*=\s*['"]([^'"]+)['"]/);
+                    const relType = tMatch ? tMatch[1] : '';
+                    const relTable = tableMatch ? tableMatch[1] : '';
+                    if (relType === 'text' && relBody) {
+                        r.customSql = relBody;
+                    } else if (relTable) {
+                        const parts = relTable.replace(/[\[\]]/g, '').split('.').map(s => s.trim()).filter(Boolean);
+                        if (parts.length >= 1) {
+                            const table = parts[parts.length - 1];
+                            const schema = parts.length >= 2 ? parts[parts.length - 2] : '';
+                            const db = parts.length >= 3 ? parts[parts.length - 3] : '';
+                            r.table = { db, schema, table };
+                        }
+                    }
+                }
+                if (r.caption || r.name) out.push(r);
+            }
+            return out;
+        }
+
+        function _prepProcessInputNode(n, connectionId, dbOverride, schemaOverride, tableMapping, tdsIndex, warnings) {
+            const elementId = sigmaShortId();
+            const nodeType = n.nodeType || '';
+            const inputName = (n.name || 'Input').trim();
+            let element, sourceTable = '', isCustomSql = false;
+
+            if (nodeType === '.v2019_3_1.LoadSqlProxy' || nodeType === 'LoadPublishedDataSource') {
+                // Try resolving via companion .tds first
+                const dsKey = (n.connectionAttributes?.datasourceName || inputName || '').toLowerCase();
+                const tds = tdsIndex.get(dsKey) || tdsIndex.get(inputName.toLowerCase());
+                if (tds && tds.table) {
+                    const tableName = tds.table.table.toUpperCase();
+                    const tdsDb = (tds.table.db || dbOverride).toUpperCase();
+                    const tdsSchema = (tds.table.schema || schemaOverride).toUpperCase();
+                    let path = [];
+                    if (tdsDb && tdsSchema) path = [tdsDb, tdsSchema, tableName];
+                    else if (tdsSchema) path = [tdsSchema, tableName];
+                    else if (tdsDb) path = [tdsDb, tableName];
+                    else path = [tableName];
+                    sourceTable = tableName;
+                    element = { id: elementId, kind: 'table', name: tableName,
+                        source: { connectionId, kind: 'warehouse-table', path },
+                        columns: [], metrics: [], order: [] };
+                    warnings.push(`✓ "${inputName}" resolved via companion .tds → warehouse-table ${path.join('.')}`);
+                    // Fall through below to add columns from n.fields[]
+                    return _prepFinishInput(n, element, sourceTable, isCustomSql, inputName);
+                }
+                if (tds && tds.customSql) {
+                    isCustomSql = true; sourceTable = 'Custom SQL';
+                    element = { id: elementId, kind: 'table',
+                        source: { connectionId, kind: 'sql', statement: tds.customSql },
+                        columns: [], metrics: [], order: [] };
+                    warnings.push(`✓ "${inputName}" resolved via companion .tds → Custom SQL with real SELECT body`);
+                    return _prepFinishInput(n, element, sourceTable, isCustomSql, inputName);
+                }
+                // Fall through to v1 stub:
+                isCustomSql = true; sourceTable = 'Custom SQL';
+                const fields = (n.fields || []).filter(f => f.name);
+                const sqlCols = fields.length > 0
+                    ? fields.map(f => {
+                        const dn = (f.caption || sigmaDisplayName(f.name)).replace(/"/g, '""');
+                        return `CAST(NULL AS ${_prepFieldTypeToSql(f.type)}) AS "${dn}"`;
+                      }).join(',\n  ')
+                    : 'NULL AS "Placeholder"';
+                // Custom SQL elements: omit `name` field (production convention).
+                element = { id: elementId, kind: 'table',
+                    source: { connectionId, kind: 'sql',
+                        statement: `-- ${inputName} (Tableau Server datasource: ${n.connectionAttributes?.datasourceName || inputName})\n-- TODO: replace with the equivalent warehouse query\nSELECT\n  ${sqlCols}` },
+                    columns: [], metrics: [], order: [] };
+                warnings.push(`ℹ "${inputName}" is a LoadSqlProxy (Tableau Server datasource) — emitted as Custom SQL placeholder.`);
+            } else if (nodeType.startsWith('.v1.Load')) {
+                let tableName = '';
+                if (nodeType === '.v1.LoadSql') {
+                    tableName = String(n.connectionAttributes?.table || n.connectionAttributes?.['table-name'] || inputName).toUpperCase();
+                } else {
+                    const fname = String(n.connectionAttributes?.filename || inputName);
+                    const base = fname.split(/[\\/]/).pop().replace(/\.[^.]+$/, '');
+                    tableName = base.toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+                }
+                const mapped = tableMapping[tableName] || tableMapping[inputName] || tableName;
+                tableName = mapped.toUpperCase();
+                let path = [];
+                if (dbOverride && schemaOverride) path = [dbOverride, schemaOverride, tableName];
+                else if (schemaOverride) path = [schemaOverride, tableName];
+                else if (dbOverride) path = [dbOverride, tableName];
+                else path = [tableName];
+                sourceTable = tableName;
+                // Element name = warehouse table name (uppercase). Required for cross-element refs
+                // [TABLE/RelName/Col] to resolve via the element's name field.
+                element = { id: elementId, kind: 'table', name: tableName,
+                    source: { connectionId, kind: 'warehouse-table', path },
+                    columns: [], metrics: [], order: [] };
+                if (nodeType !== '.v1.LoadSql') warnings.push(`ℹ "${inputName}" is a ${nodeType} file input — mapped to warehouse table "${tableName}". Use tableMapping to override.`);
+            } else {
+                isCustomSql = true; sourceTable = 'Custom SQL';
+                element = { id: elementId, kind: 'table',
+                    source: { connectionId, kind: 'sql',
+                        statement: `-- ${inputName} (unrecognized Tableau Prep input type ${nodeType})\n-- TODO: replace with the equivalent warehouse query\nSELECT NULL AS "Placeholder"` },
+                    columns: [], metrics: [], order: [] };
+                warnings.push(`⚠ "${inputName}" has unrecognized input type ${nodeType} — emitted as Custom SQL placeholder.`);
+            }
+
+            return _prepFinishInput(n, element, sourceTable, isCustomSql, inputName);
+        }
+
+        // Add columns from n.fields[] and build ChainState. Shared by all input branches
+        // (.v1.LoadSql / file / LoadSqlProxy stub / .tds-resolved).
+        function _prepFinishInput(n, element, sourceTable, isCustomSql, inputName) {
+            const colByName = new Map();
+            for (const f of (n.fields || [])) {
+                if (!f.name) continue;
+                const dispName = (f.caption || sigmaDisplayName(f.name));
+                const upper = f.name.toUpperCase();
+                const id = isCustomSql ? sigmaShortId() : sigmaInodeId(upper);
+                const formula = isCustomSql ? `[Custom SQL/${dispName}]` : sigmaColFormula(sourceTable, f.name);
+                const col = { id, formula };
+                if (!isCustomSql && f.caption) col.name = f.caption;
+                element.columns.push(col); element.order.push(id);
+                colByName.set(dispName, id);
+                colByName.set(f.name, id);
+            }
+            return { element, colByName, upstreamChainIds: [n.id], sourceTable, isCustomSql, finalized: false,
+                displayableName: sigmaDisplayName(inputName) };
+        }
+
+        function _prepApplyTransformAction(n, state, warnings, stats) {
+            const t = n.nodeType || '';
+            stats.transforms++;
+            if (t === '.v1.AddColumn') { _prepAddColumn(n, state, warnings); stats.calculatedColumns++; }
+            else if (t === '.v1.RemoveColumns') { _prepRemoveColumns(n, state); stats.removedColumns += (n.columnNames?.length || 0); }
+            else if (t === '.v1.RenameColumn') { _prepRenameColumn(n, state); stats.renames++; }
+            else if (t.endsWith('.Remap')) { _prepRemap(n, state); stats.calculatedColumns++; }
+            else if (t === '.v1.FilterOperation') { _prepFilter(n, state, warnings); stats.filters++; }
+            else if (t === '.v1.ChangeColumnType') { _prepChangeType(n, state, warnings); }
+            else if (t === '.v1.KeepOnlyColumns' || t === '.v1.RestrictColumns') { _prepKeepOnly(n, state); }
+            else if (t === '.v1.Pivot' || t.toLowerCase().includes('pivot')) {
+                warnings.push(`ℹ Pivot step "${n.name}" — not converted, no Sigma equivalent. Add manually.`); stats.skipped++;
+            } else if (['.v1.Script','.v1.RunScript','.v1.RunCommand','.v1.Prediction'].includes(t)) {
+                warnings.push(`⚠ Script/Run step "${n.name}" (${t}) skipped — no Sigma equivalent.`); stats.skipped++;
+            } else { warnings.push(`ℹ Transform "${n.name}" (${t}) not recognized — skipped.`); stats.skipped++; }
+        }
+
+        function _prepAddColumn(n, state, warnings) {
+            const newColName = n.columnName || 'New Column';
+            const expr = n.expression || '';
+            const localW = [];
+            const formula = tableauFormulaToSigma(expr, localW) || `/* ${expr} */`;
+            const id = sigmaShortId();
+            state.element.columns.push({ id, formula, name: newColName });
+            state.element.order.push(id);
+            state.colByName.set(newColName, id);
+            for (const w of localW) warnings.push(`AddColumn "${newColName}": ${w}`);
+        }
+
+        function _prepRemoveColumns(n, state) {
+            const dropIds = new Set();
+            const dropNames = new Set();
+            for (const cn of n.columnNames || []) {
+                const id = state.colByName.get(cn) || state.colByName.get(sigmaDisplayName(cn));
+                if (id) {
+                    dropIds.add(id);
+                    dropNames.add(cn);
+                    dropNames.add(sigmaDisplayName(cn));
+                }
+            }
+            // Don't drop columns still referenced by other calc col formulas — keep them as hidden.
+            const stillReferenced = new Set();
+            for (const c of state.element.columns) {
+                if (dropIds.has(c.id)) continue;
+                for (const m of (c.formula || '').matchAll(/\[([^/\]]+?)\]/g)) {
+                    if (dropNames.has(m[1])) stillReferenced.add(m[1]);
+                }
+            }
+            if (stillReferenced.size > 0) {
+                const keepIds = new Set();
+                for (const c of state.element.columns) {
+                    if (!dropIds.has(c.id)) continue;
+                    const dn = c.name || _prepExtractDisplay(c.formula);
+                    if (stillReferenced.has(dn) || stillReferenced.has(sigmaDisplayName(dn))) {
+                        c.hidden = true;
+                        keepIds.add(c.id);
+                    }
+                }
+                for (const id of keepIds) dropIds.delete(id);
+            }
+            state.element.columns = state.element.columns.filter(c => !dropIds.has(c.id));
+            state.element.order = state.element.order.filter(id => !dropIds.has(id));
+            for (const cn of (n.columnNames || [])) {
+                const id = state.colByName.get(cn);
+                if (id && dropIds.has(id)) state.colByName.delete(cn);
+                const id2 = state.colByName.get(sigmaDisplayName(cn));
+                if (id2 && dropIds.has(id2)) state.colByName.delete(sigmaDisplayName(cn));
+            }
+        }
+
+        function _prepRenameColumn(n, state) {
+            const oldName = n.columnName || '';
+            const newName = n.rename || oldName;
+            if (!oldName || !newName) return;
+            const id = state.colByName.get(oldName) || state.colByName.get(sigmaDisplayName(oldName));
+            if (!id) return;
+            for (const c of state.element.columns) {
+                if (c.id !== id) continue;
+                c.name = newName;
+                state.colByName.set(newName, id);
+                state.colByName.delete(oldName);
+                state.colByName.delete(sigmaDisplayName(oldName));
+                return;
+            }
+        }
+
+        function _prepKeepOnly(n, state) {
+            const keepIds = new Set();
+            for (const cn of n.columnNames || []) {
+                const id = state.colByName.get(cn) || state.colByName.get(sigmaDisplayName(cn));
+                if (id) keepIds.add(id);
+            }
+            state.element.columns = state.element.columns.filter(c => keepIds.has(c.id));
+            state.element.order = state.element.order.filter(id => keepIds.has(id));
+        }
+
+        function _prepChangeType(n, state, warnings) {
+            const colName = n.columnName || '';
+            const newType = (n.newType || '').toLowerCase();
+            if (!colName) return;
+            const wrap = { string:'Text', text:'Text', integer:'Int', int:'Int', double:'Number', float:'Number', decimal:'Number', number:'Number', date:'Date', datetime:'Datetime', boolean:'Boolean' };
+            const fn = wrap[newType];
+            if (!fn) { warnings.push(`ChangeColumnType "${colName}" → ${newType}: unknown type, skipped.`); return; }
+            const id = state.colByName.get(colName) || state.colByName.get(sigmaDisplayName(colName));
+            for (const c of state.element.columns) {
+                if (c.id !== id) continue;
+                c.formula = `${fn}(${c.formula})`;
+                return;
+            }
+        }
+
+        function _prepRemap(n, state) {
+            const colName = n.columnName || '';
+            const values = n.values || {};
+            if (!colName || !Object.keys(values).length) return;
+            const id = state.colByName.get(colName) || state.colByName.get(sigmaDisplayName(colName));
+            const targetCol = state.element.columns.find(c => c.id === id);
+            if (!targetCol) return;
+            // Use the column's CURRENT formula as the value base (e.g. [ORDER_FACT/Order Status]).
+            // [displayName] would create a self-reference Sigma can't resolve.
+            const baseRef = targetCol.formula;
+            const stripQ = s => s.replace(/^"(.*)"$/, '$1');
+            let formula = baseRef;
+            for (const [newValRaw, oldVals] of Object.entries(values)) {
+                const newVal = stripQ(newValRaw);
+                const oldArr = oldVals.map(stripQ);
+                if (oldArr.length === 1) formula = `If(${baseRef} = "${oldArr[0]}", "${newVal}", ${formula})`;
+                else formula = `If(In(${baseRef}, ${oldArr.map(v => `"${v}"`).join(', ')}), "${newVal}", ${formula})`;
+            }
+            targetCol.formula = formula;
+            // Preserve display name so downstream refs to [Order Status] still resolve.
+            if (!targetCol.name) targetCol.name = sigmaDisplayName(colName);
+        }
+
+        function _prepFilter(n, state, warnings) {
+            const expr = n.filterExpression || '';
+            if (!expr) return;
+            const sigma = tableauFormulaToSigma(expr, warnings) || expr;
+            const id = sigmaShortId();
+            state.element.columns.push({
+                id, formula: sigma,
+                name: `Filter: ${(n.name || 'Filter').replace(/^Filter\s*/i, '').trim() || expr.slice(0, 40)}`,
+            });
+            state.element.order.push(id);
+            warnings.push(`ℹ Filter "${n.name}" emitted as a calculated boolean column "${state.element.columns[state.element.columns.length-1].name}" — wire as a page filter in Sigma.`);
+        }
+
+        function _prepExtractDisplay(formula) {
+            const m = formula.match(/^\[(?:.+\/)?([^\]]+)\]$/);
+            return m ? m[1] : '';
+        }
+
+        // Recursively inline element-internal [Display] refs in a calc col formula
+        // by substituting them with their upstream column's formula. Refs that already
+        // include a "/" (warehouse-table or cross-element refs) are preserved as-is.
+        function _prepInlineCalcCol(formula, sourceElement, depth = 0) {
+            if (depth > 5) return formula;
+            let changed = false;
+            const result = formula.replace(/\[([^/\]]+?)\]/g, (match, name) => {
+                const col = sourceElement.columns.find(c => (c.name || _prepExtractDisplay(c.formula)) === name);
+                if (!col) return match;
+                if (/^\[[^/\]]+\/[^\]]+\]$/.test(col.formula.trim())) { changed = true; return col.formula; }
+                changed = true;
+                return '(' + _prepInlineCalcCol(col.formula, sourceElement, depth + 1) + ')';
+            });
+            return changed ? result : formula;
+        }
+
+        function _prepFinalizeChain(state, elements) {
+            if (state.finalized) return;
+            state.finalized = true;
+            if (state.element.metrics?.length === 0) delete state.element.metrics;
+            elements.push(state.element);
+        }
+
+        function _prepProcessSuperJoin(n, preds, chainState, elements, warnings) {
+            const action = n.actionNode;
+            if (!action || !action.conditions || !action.conditions.length) {
+                warnings.push(`⚠ SuperJoin "${n.name}" missing actionNode.conditions — skipped.`); return null;
+            }
+            const leftPred = preds.find(p => (p.nextNamespace || '').toLowerCase() === 'left');
+            const rightPred = preds.find(p => (p.nextNamespace || '').toLowerCase() === 'right');
+            if (!leftPred || !rightPred) {
+                warnings.push(`⚠ SuperJoin "${n.name}": couldn't identify left/right inputs — skipped.`); return null;
+            }
+            const leftState = chainState.get(leftPred.from);
+            const rightState = chainState.get(rightPred.from);
+            if (!leftState || !rightState) { warnings.push(`⚠ SuperJoin "${n.name}": upstream chains missing — skipped.`); return null; }
+            if (!leftState.finalized) _prepFinalizeChain(leftState, elements);
+            if (!rightState.finalized) _prepFinalizeChain(rightState, elements);
+
+            const keys = [];
+            for (const c of action.conditions) {
+                const lExpr = (c.leftExpression || '').replace(/^\[(.+)\]$/, '$1');
+                const rExpr = (c.rightExpression || '').replace(/^\[(.+)\]$/, '$1');
+                if (!lExpr || !rExpr) continue;
+                const sId = leftState.colByName.get(lExpr);
+                const tId = rightState.colByName.get(rExpr);
+                if (!sId || !tId) {
+                    warnings.push(`⚠ SuperJoin "${n.name}" condition ${lExpr}=${rExpr}: column not found — relationship key skipped.`);
+                    continue;
+                }
+                keys.push({ sourceColumnId: sId, targetColumnId: tId });
+            }
+            // Relationship name = TARGET warehouse table name (matches buildDerivedElements
+            // pattern in production data models). For Custom SQL targets without a warehouse
+            // path, fall back to the input's friendly name.
+            const rightSrcTable = rightState.element.source?.path?.slice(-1)[0]
+                || rightState.element.name
+                || rightState.displayableName
+                || 'Right';
+            const relName = String(rightSrcTable).toUpperCase().replace(/\s+/g, '_');
+            if (keys.length === 0) {
+                warnings.push(`⚠ SuperJoin "${n.name}": no resolvable join keys — relationship not created.`);
+            } else {
+                const joinType = (action.joinType || 'left').toLowerCase();
+                const relType = joinType === 'inner' ? 'N:1' : joinType === 'right' ? '1:N' : 'N:1';
+                (leftState.element.relationships ??= []).push({
+                    id: sigmaShortId(),
+                    targetElementId: rightState.element.id,
+                    keys,
+                    name: relName,
+                    relationshipType: relType,
+                });
+            }
+
+            // Build a derived "join view" element. Left columns reuse upstream formulas;
+            // right columns use cross-element refs [LeftTable/RelName/Field].
+            const leftSrcTable = leftState.element.source?.path?.slice(-1)[0] || (leftState.element.name || 'Left');
+            const joinViewId = sigmaShortId();
+            const joinView = {
+                id: joinViewId, kind: 'table', name: sigmaDisplayName(n.name || `${leftState.element.name} joined`),
+                source: { kind: 'table', elementId: leftState.element.id },
+                columns: [], metrics: [], order: [],
+            };
+            const joinColByName = new Map();
+            const joinLogicalRefs = new Map();
+            // Use [LeftElement.name/CurrentDisplay] form for both join view formulas and
+            // logical refs. Sigma resolves [TABLE/Col] via the parent's display name; copying
+            // the upstream formula verbatim breaks for renamed columns whose physical name
+            // is no longer the display name on the parent element.
+            const leftElementName = leftState.element.name || leftSrcTable;
+            for (const c of leftState.element.columns) {
+                const dn = c.name || _prepExtractDisplay(c.formula);
+                if (!dn) continue;
+                const id = sigmaShortId();
+                const childRef = `[${leftElementName}/${dn}]`;
+                joinView.columns.push({ id, formula: childRef, name: dn });
+                joinView.order.push(id);
+                joinColByName.set(dn, id);
+                joinLogicalRefs.set(dn, childRef);
+                for (const [k, v] of leftState.colByName) {
+                    if (v === c.id && k !== dn) {
+                        joinColByName.set(k, id);
+                        joinLogicalRefs.set(k, childRef);
+                    }
+                }
+            }
+            if (keys.length > 0) {
+                for (const c of rightState.element.columns) {
+                    const dn = c.name || _prepExtractDisplay(c.formula);
+                    if (!dn) continue;
+                    const id = sigmaShortId();
+                    const xref = `[${leftSrcTable}/${relName}/${dn}]`;
+                    joinView.columns.push({ id, formula: xref, name: dn });
+                    joinView.order.push(id);
+                    if (!joinColByName.has(dn)) {
+                        joinColByName.set(dn, id);
+                        joinLogicalRefs.set(dn, xref);
+                    }
+                    for (const [k, v] of rightState.colByName) {
+                        if (v === c.id && k !== dn && !joinColByName.has(k)) {
+                            joinColByName.set(k, id);
+                            joinLogicalRefs.set(k, xref);
+                        }
+                    }
+                }
+            }
+            elements.push(joinView);
+            const newState = { element: joinView, colByName: joinColByName,
+                upstreamChainIds: [...leftState.upstreamChainIds, ...rightState.upstreamChainIds, n.id],
+                sourceTable: '', isCustomSql: false, finalized: true,
+                displayableName: leftState.displayableName };
+            newState._logicalRefs = joinLogicalRefs;
+            newState._aggregateParent = leftState.element;
+            return newState;
+        }
+
+        function _prepProcessSuperUnion(n, preds, chainState, elements, connectionId, warnings) {
+            const upstreamStates = preds.map(p => chainState.get(p.from)).filter(Boolean);
+            if (!upstreamStates.length) { warnings.push(`⚠ SuperUnion "${n.name}" has no upstream chains — skipped.`); return null; }
+            for (const s of upstreamStates) if (!s.finalized) _prepFinalizeChain(s, elements);
+            const elementId = sigmaShortId();
+            const action = n.actionNode || {};
+            const fieldMappings = action.namespaceFieldMappings || [];
+            const unionEl = {
+                id: elementId, kind: 'table', name: sigmaDisplayName(n.name || 'Union'),
+                source: { connectionId, kind: 'union', inputs: upstreamStates.map(s => ({ elementId: s.element.id })) },
+                columns: [], metrics: [], order: [],
+            };
+            const canon = upstreamStates[0];
+            const colByName = new Map();
+            for (const c of canon.element.columns) {
+                const dn = c.name || _prepExtractDisplay(c.formula) || 'col';
+                const id = sigmaShortId();
+                unionEl.columns.push({ id, formula: `[${dn}]`, name: c.name });
+                unionEl.order.push(id);
+                colByName.set(dn, id);
+            }
+            if (fieldMappings.length > 0) warnings.push(`ℹ SuperUnion "${n.name}" has namespaceFieldMappings — manual reconciliation may be needed.`);
+            elements.push(unionEl);
+            return { element: unionEl, colByName, upstreamChainIds: upstreamStates.flatMap(s => s.upstreamChainIds),
+                sourceTable: '', isCustomSql: false, finalized: true,
+                displayableName: sigmaDisplayName(n.name || 'Union') };
+        }
+
+        function _prepLogicalRefsName(logicalRefs, candidate) {
+            const ref = logicalRefs.get(candidate) || logicalRefs.get(sigmaDisplayName(candidate));
+            if (!ref) return null;
+            let pretty = null;
+            for (const [k, v] of logicalRefs) {
+                if (v !== ref) continue;
+                if (!pretty || (k.includes(' ') || (/[a-z]/.test(k) && /[A-Z]/.test(k)))) pretty = k;
+            }
+            return pretty;
+        }
+
+        function _prepProcessSuperAggregate(n, preds, chainState, elements, warnings) {
+            const upstream = preds[0] && chainState.get(preds[0].from);
+            if (!upstream) { warnings.push(`⚠ SuperAggregate "${n.name}" has no upstream chain — skipped.`); return null; }
+            if (!upstream.finalized) _prepFinalizeChain(upstream, elements);
+            const action = n.actionNode || {};
+            const groupBys = action.groupByFields || [];
+            const aggs = action.aggregateFields || [];
+            // Determine parent element: when upstream came from a SuperJoin we use the
+            // _aggregateParent (LEFT warehouse-table) so cross-element refs resolve cleanly.
+            const parentEl = upstream._aggregateParent || upstream.element;
+            const logicalRefs = upstream._logicalRefs || new Map();
+            if (logicalRefs.size === 0) {
+                const parentName = upstream.element.name
+                    || upstream.element.source?.path?.slice(-1)[0]
+                    || 'Parent';
+                for (const c of upstream.element.columns) {
+                    const dn = c.name || _prepExtractDisplay(c.formula);
+                    if (dn) logicalRefs.set(dn, `[${parentName}/${dn}]`);
+                }
+            }
+            function resolveRef(name) {
+                if (logicalRefs.has(name)) return logicalRefs.get(name);
+                if (logicalRefs.has(sigmaDisplayName(name))) return logicalRefs.get(sigmaDisplayName(name));
+                return null;
+            }
+            const elementId = sigmaShortId();
+            const childEl = {
+                id: elementId, kind: 'table', name: sigmaDisplayName(n.name || 'Aggregate'),
+                source: { kind: 'table', elementId: parentEl.id },
+                columns: [], metrics: [], order: [],
+            };
+            const colByName = new Map();
+            const groupByIds = [];
+            for (const gb of groupBys) {
+                const ref = resolveRef(gb.columnName);
+                if (!ref) { warnings.push(`⚠ SuperAggregate "${n.name}": groupBy column "${gb.columnName}" not on upstream — skipped.`); continue; }
+                const cId = sigmaShortId();
+                const dn = gb.newColumnName || (_prepLogicalRefsName(logicalRefs, gb.columnName) || gb.columnName);
+                childEl.columns.push({ id: cId, formula: ref, name: dn });
+                childEl.order.push(cId);
+                colByName.set(dn, cId);
+                groupByIds.push(cId);
+            }
+            const aggMap = {
+                SUM: c => `Sum([${c}])`, AVG: c => `Avg([${c}])`, AVERAGE: c => `Avg([${c}])`,
+                MIN: c => `Min([${c}])`, MAX: c => `Max([${c}])`,
+                COUNT: c => `CountIf(IsNotNull([${c}]))`,
+                COUNTD: c => `CountDistinct([${c}])`,
+                MEDIAN: c => `Median([${c}])`, STDEV: c => `StdDev([${c}])`,
+            };
+            const calcIds = [];
+            const passthroughAdded = new Map();
+            for (const a of aggs) {
+                const fn = aggMap[(a.function || '').toUpperCase()];
+                if (!fn) { warnings.push(`⚠ SuperAggregate "${n.name}": agg function "${a.function}" not supported — skipped.`); continue; }
+                const refFormula = resolveRef(a.columnName);
+                if (!refFormula) { warnings.push(`⚠ SuperAggregate "${n.name}": agg column "${a.columnName}" not on upstream — skipped.`); continue; }
+                const refDispName = _prepLogicalRefsName(logicalRefs, a.columnName) || sigmaDisplayName(a.columnName);
+                let passId = passthroughAdded.get(refDispName) || colByName.get(refDispName);
+                if (!passId) {
+                    passId = sigmaShortId();
+                    // Hide aggregate-referenced passthroughs so Sigma's grouping outputs
+                    // one row per groupBy combo (visible non-grouped cols force per-row output).
+                    childEl.columns.push({ id: passId, formula: refFormula, name: refDispName, hidden: true });
+                    childEl.order.push(passId);
+                    passthroughAdded.set(refDispName, passId);
+                    colByName.set(refDispName, passId);
+                }
+                const dn = a.newColumnName || a.columnName;
+                const id = sigmaShortId();
+                childEl.columns.push({ id, formula: fn(refDispName), name: dn });
+                childEl.order.push(id);
+                colByName.set(dn, id);
+                calcIds.push(id);
+            }
+            if (groupByIds.length > 0 && calcIds.length > 0) {
+                childEl.groupings = [{ id: sigmaShortId(), groupBy: groupByIds, calculations: calcIds }];
+            }
+            if (childEl.metrics?.length === 0) delete childEl.metrics;
+            elements.push(childEl);
+            return { element: childEl, colByName, upstreamChainIds: [...upstream.upstreamChainIds, n.id],
+                sourceTable: '', isCustomSql: false, finalized: true,
+                displayableName: sigmaDisplayName(n.name || 'Aggregate') };
+        }
+
+        function loadCubeExample() {
+            _cubeFiles = [{
+                name: 'orders.yml',
+                content: `cubes:
+  - name: orders
+    sql_table: PUBLIC.ORDERS
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: status
+        sql: status
+        type: string
+      - name: created_at
+        sql: created_at
+        type: time
+      - name: full_status
+        sql: "\${CUBE}.status || ' - ' || \${CUBE}.region"
+        type: string
+    measures:
+      - name: count
+        type: count
+      - name: total_revenue
+        sql: "\${CUBE}.amount"
+        type: sum
+      - name: paying_count
+        sql: "\${CUBE}.id"
+        type: count
+        filters:
+          - sql: "\${CUBE}.paying = 'true'"
+      - name: paying_pct
+        sql: "\${paying_count} / NULLIF(\${count}, 0)"
+        type: number
+    joins:
+      - name: customers
+        relationship: many_to_one
+        sql: "\${CUBE}.customer_id = \${customers.id}"
+  - name: customers
+    sql_table: PUBLIC.CUSTOMERS
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: name
+        sql: name
+        type: string
+      - name: city
+        sql: city
+        type: string
+views:
+  - name: orders_view
+    cubes:
+      - join_path: orders
+        includes: "*"
+      - join_path: orders.customers
+        includes: ["name", "city"]
+        prefix: true
+`
+            }];
+            // Render file chip
+            const listEl = document.getElementById('cubeFileList');
+            listEl.innerHTML = '';
+            const chip = document.createElement('div');
+            chip.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 8px;background:var(--bg-tertiary);border-radius:6px;font-size:11px;';
+            chip.innerHTML = `<span>📄</span><span style="flex:1;">orders.yml (example)</span>`;
+            listEl.appendChild(chip);
+            document.getElementById('cubeInput').value = _cubeFiles[0].content;
+            runCubeConversion();
+        }
+
+        // ── Cube.dev conversion logic (mirrors sigma-data-model-mcp/src/cube.ts) ──
+
+        const _CUBE_FUNC_MAP = {
+            MONTH: 'Month', YEAR: 'Year', DAY: 'Day', HOUR: 'Hour',
+            QUARTER: 'Quarter', WEEK: 'Week', MINUTE: 'Minute', SECOND: 'Second',
+            CONCAT: 'Concat', ROUND: 'Round', ABS: 'Abs',
+            CEIL: 'Ceiling', CEILING: 'Ceiling', FLOOR: 'Floor',
+            SQRT: 'Sqrt', POWER: 'Power', MOD: 'Mod', LOG: 'Log',
+            COALESCE: 'Coalesce', NVL: 'Coalesce', IFNULL: 'Coalesce',
+            NULLIF: 'Nullif', IFF: 'If', IIF: 'If',
+            LOWER: 'Lower', UPPER: 'Upper', TRIM: 'Trim',
+            LTRIM: 'Ltrim', RTRIM: 'Rtrim', LENGTH: 'Len', LEN: 'Len',
+            LEFT: 'Left', RIGHT: 'Right',
+            SUBSTR: 'Mid', SUBSTRING: 'Mid',
+            REPLACE: 'Replace', SPLIT_PART: 'SplitPart',
+            CONTAINS: 'Contains',
+            DATEDIFF: 'DateDiff', DATE_DIFF: 'DateDiff',
+            DATEADD: 'DateAdd', DATE_ADD: 'DateAdd',
+            DATE_TRUNC: 'DateTrunc', TRUNC: 'DateTrunc',
+            TO_DATE: 'Date', TO_CHAR: 'Text', TO_NUMBER: 'Number',
+            GETDATE: 'Now', CURRENT_DATE: 'Today', CURRENT_TIMESTAMP: 'Now',
+            IS_NULL: 'IsNull', IS_NOT_NULL: 'IsNotNull',
+            NOT: 'Not', AND: 'And', OR: 'Or',
+            SUM: 'Sum', COUNT: 'Count', AVG: 'Avg', MIN: 'Min', MAX: 'Max',
+        };
+
+        // Map Tableau Prep field types → ANSI SQL types for placeholder CAST() expressions.
+        function _prepFieldTypeToSql(t) {
+            switch ((t || '').toLowerCase()) {
+                case 'string': return 'VARCHAR';
+                case 'integer': case 'int': return 'INTEGER';
+                case 'number': case 'double': case 'float': case 'decimal': return 'DOUBLE';
+                case 'date': return 'DATE';
+                case 'datetime': case 'timestamp': return 'TIMESTAMP';
+                case 'boolean': case 'bool': return 'BOOLEAN';
+                default: return 'VARCHAR';
+            }
+        }
+
+        // Walk SQL for ${CUBE}.col refs and auto-add missing columns to the element.
+        function _cubeEnsureFilterCols(sql, colIdMap, sourceTable, isCustomSql, addCol) {
+            if (!sql) return;
+            const cols = new Set();
+            for (const m of sql.matchAll(/\$\{CUBE\}\.(\w+)/g)) cols.add(m[1].toUpperCase());
+            for (const m of sql.matchAll(/\$\{CUBE\.(\w+)\}/g)) cols.add(m[1].toUpperCase());
+            for (const col of cols) {
+                if (colIdMap[col]) continue;
+                const formula = isCustomSql ? `[${sigmaDisplayName(col)}]` : sigmaColFormula(sourceTable, col);
+                addCol(col, formula);
+            }
+        }
+
+        function _cubeIsSimpleColumnRef(sql) {
+            if (!sql) return false;
+            const s = sql.trim();
+            return /^\$\{CUBE\}\.\w+$/.test(s) || /^\$\{CUBE\.\w+\}$/.test(s) || /^\w+$/.test(s);
+        }
+
+        function _cubeExtractColumnName(sql) {
+            if (!sql) return null;
+            const s = sql.trim();
+            let m = s.match(/^\$\{CUBE\}\.(\w+)$/); if (m) return m[1];
+            m = s.match(/^\$\{CUBE\.(\w+)\}$/);     if (m) return m[1];
+            m = s.match(/^(\w+)$/);                 if (m) return m[1];
+            return null;
+        }
+
+        function _cubeTranslateFormula(sql, tableName, isCustomSql) {
+            if (!sql || typeof sql !== 'string') return null;
+            let expr = sql.trim();
+            expr = expr.replace(/\$\{CUBE\}\.(\w+)/g, (_, col) =>
+                isCustomSql ? `[${sigmaDisplayName(col)}]` : `[${tableName}/${sigmaDisplayName(col)}]`);
+            expr = expr.replace(/\$\{CUBE\.(\w+)\}/g, (_, col) =>
+                isCustomSql ? `[${sigmaDisplayName(col)}]` : `[${tableName}/${sigmaDisplayName(col)}]`);
+            expr = expr.replace(/\$\{(\w+)\.(\w+)\}/g, (_, _o, field) => `[${sigmaDisplayName(field)}]`);
+            expr = expr.replace(/\$\{(\w+)\}\.(\w+)/g, (_, _o, field) => `[${sigmaDisplayName(field)}]`);
+            expr = expr.replace(/\$\{(\w+)\}/g, (_, field) => `[${sigmaDisplayName(field)}]`);
+
+            expr = expr.replace(/(\[[^\]]+\]|\w+)\s*::\s*(\w+)/gi, (_, val, typ) => {
+                const t = typ.toUpperCase();
+                if (t === 'DATE') return `Date(${val})`;
+                if (t.startsWith('TIMESTAMP') || t === 'DATETIME') return `Datetime(${val})`;
+                if (['VARCHAR','STRING','TEXT','CHAR'].includes(t)) return `Text(${val})`;
+                if (['INTEGER','INT','BIGINT','SMALLINT'].includes(t)) return `Int(${val})`;
+                if (['FLOAT','DOUBLE','NUMERIC','DECIMAL','NUMBER'].includes(t)) return `Number(${val})`;
+                if (t === 'BOOLEAN') return `Boolean(${val})`;
+                return val;
+            });
+            expr = expr.replace(/\s*\|\|\s*/g, ' & ');
+            expr = expr.replace(/'([^']*)'/g, '"$1"');
+            expr = expr.replace(/(\w+(?:\([^)]*\))?|\[[^\]]+\])\s+IN\s+\(([^)]+)\)/gi,
+                (_, lhs, items) => `In(${lhs}, ${items.split(',').map(v => v.trim()).join(', ')})`);
+            expr = _cubeSqlCaseToIf(expr);
+            expr = expr.replace(/\b([A-Za-z_][A-Za-z0-9_]*)\s*(?=\()/g,
+                (match, fn) => _CUBE_FUNC_MAP[fn.toUpperCase()] ?? match);
+            return expr;
+        }
+
+        function _cubeTranslateMeasureExpr(sql) {
+            let expr = sql.trim();
+            expr = expr.replace(/\$\{CUBE\}\.(\w+)/g, (_, col) => `[${sigmaDisplayName(col)}]`);
+            expr = expr.replace(/\$\{CUBE\.(\w+)\}/g, (_, col) => `[${sigmaDisplayName(col)}]`);
+            expr = expr.replace(/\$\{(\w+)\.(\w+)\}/g, (_, _o, f) => `[${sigmaDisplayName(f)}]`);
+            expr = expr.replace(/\$\{(\w+)\}\.(\w+)/g, (_, _o, f) => `[${sigmaDisplayName(f)}]`);
+            expr = expr.replace(/\$\{(\w+)\}/g, (_, m) => `[${sigmaDisplayName(m)}]`);
+            expr = expr.replace(/'([^']*)'/g, '"$1"');
+            expr = _cubeSqlCaseToIf(expr);
+            expr = expr.replace(/\b([A-Za-z_][A-Za-z0-9_]*)\s*(?=\()/g,
+                (match, fn) => _CUBE_FUNC_MAP[fn.toUpperCase()] ?? match);
+            return expr;
+        }
+
+        function _cubeTranslateRawSql(sql, cubeName) {
+            return sql
+                .replace(/\$\{CUBE\}/g, cubeName)
+                .replace(/\$\{CUBE\.(\w+)\}/g, `${cubeName}.$1`)
+                .replace(/\$\{(\w+)\.(\w+)\}/g, '$1.$2')
+                .replace(/\$\{(\w+)\}/g, '$1');
+        }
+
+        function _cubeWrapAgg(type, inner) {
+            const map = {
+                sum: e => `Sum(${e})`,
+                avg: e => `Avg(${e})`, average: e => `Avg(${e})`,
+                min: e => `Min(${e})`, max: e => `Max(${e})`,
+                count: e => `CountIf(IsNotNull(${e}))`,
+                count_distinct: e => `CountDistinct(${e})`,
+                count_distinct_approx: e => `CountDistinct(${e})`,
+                median: e => `Median(${e})`,
+                sum_boolean: e => `CountIf(${e})`,
+                runningtotal: e => `Sum(${e})`,
+            };
+            return (map[type] ?? (e => `Sum(${e})`))(inner);
+        }
+
+        function _cubeWrapAggIf(type, inner, cond) {
+            const map = {
+                sum: (e, c) => `SumIf(${e}, ${c})`,
+                avg: (e, c) => `AvgIf(${e}, ${c})`, average: (e, c) => `AvgIf(${e}, ${c})`,
+                min: (e, c) => `MinIf(${e}, ${c})`, max: (e, c) => `MaxIf(${e}, ${c})`,
+                count: (_e, c) => `CountIf(${c})`,
+                count_distinct: (e, c) => `CountDistinctIf(${e}, ${c})`,
+                count_distinct_approx: (e, c) => `CountDistinctIf(${e}, ${c})`,
+            };
+            return (map[type] ?? ((e, c) => `SumIf(${e}, ${c})`))(inner, cond);
+        }
+
+        function _cubeSqlCaseToIf(expr) {
+            let prev = ''; let safety = 0;
+            while (expr !== prev && safety++ < 20) {
+                prev = expr;
+                expr = expr.replace(/\bCASE\b((?:(?!\bCASE\b).)*?)\bEND\b/is,
+                    (_, body) => _cubeParseCaseBody(body));
+            }
+            return expr;
+        }
+
+        function _cubeParseCaseBody(body) {
+            const parts = []; let current = ''; let depth = 0; let i = 0;
+            const up = body.toUpperCase();
+            while (i < body.length) {
+                if (body[i] === '(' || body[i] === '[') depth++;
+                else if (body[i] === ')' || body[i] === ']') depth--;
+                if (depth === 0) {
+                    let matched = false;
+                    for (const kw of ['WHEN','THEN','ELSE']) {
+                        if (up.startsWith(kw, i) &&
+                            (i === 0 || !/[A-Z0-9_]/i.test(body[i-1])) &&
+                            (i + kw.length >= body.length || !/[A-Z0-9_]/i.test(body[i + kw.length]))) {
+                            parts.push({ kw: null, val: current.trim() });
+                            parts.push({ kw, val: null });
+                            current = ''; i += kw.length; matched = true; break;
+                        }
+                    }
+                    if (matched) continue;
+                }
+                current += body[i]; i++;
+            }
+            if (current.trim()) parts.push({ kw: null, val: current.trim() });
+            const conditions = []; let elseVal = 'null'; let pi = 0;
+            while (pi < parts.length) {
+                if (parts[pi].kw === 'WHEN') {
+                    const cond = (parts[pi+1]?.val ?? '').trim();
+                    if (parts[pi+2]?.kw === 'THEN') {
+                        const then = (parts[pi+3]?.val ?? '').trim();
+                        conditions.push({ cond, then }); pi += 4;
+                    } else pi++;
+                } else if (parts[pi].kw === 'ELSE') {
+                    elseVal = (parts[pi+1]?.val ?? 'null').trim(); pi += 2;
+                } else pi++;
+            }
+            let result = elseVal;
+            for (let k = conditions.length - 1; k >= 0; k--)
+                result = `If(${conditions[k].cond}, ${conditions[k].then}, ${result})`;
+            return result;
+        }
+
+        function _cubeParseJoinSqlRefs(sql, fromCube, toCube) {
+            if (!sql) return null;
+            const refPattern = /\$\{(\w+)(?:\.(\w+))?\}(?:\.(\w+))?/g;
+            const refs = []; let m;
+            while ((m = refPattern.exec(sql)) !== null) {
+                const col = m[2] || m[3];
+                if (!col) continue;
+                refs.push({ cube: m[1], col });
+            }
+            if (refs.length < 2) return null;
+            const fl = fromCube.toLowerCase(); const tl = toCube.toLowerCase();
+            let fromRef = null, toRef = null;
+            for (const r of refs) {
+                const cl = r.cube.toLowerCase();
+                if (cl === 'cube' || cl === fl) fromRef ??= r;
+                else if (cl === tl) toRef ??= r;
+            }
+            if (!fromRef || !toRef) { fromRef = refs[0]; toRef = refs[1]; }
+            return { fromCol: fromRef.col, toCol: toRef.col };
+        }
+
+        // YAML parser
+        function _parseCubeYaml(text) {
+            const out = { cubes: [], views: [], preAggCount: 0, segmentCount: 0 };
+            const docs = [];
+            jsyaml.loadAll(text, d => { if (d) docs.push(d); });
+            for (const doc of docs) {
+                if (Array.isArray(doc.cubes)) {
+                    for (const c of doc.cubes) {
+                        out.preAggCount += (c.pre_aggregations?.length || 0);
+                        out.segmentCount += (c.segments?.length || 0);
+                        out.cubes.push(_normCubeYaml(c));
+                    }
+                }
+                if (Array.isArray(doc.views)) for (const v of doc.views) out.views.push(_normViewYaml(v));
+            }
+            return out;
+        }
+
+        function _normCubeYaml(c) {
+            return {
+                name: String(c.name || ''),
+                sql_table: c.sql_table ? String(c.sql_table) : undefined,
+                sql: c.sql ? String(c.sql) : undefined,
+                title: c.title ? String(c.title) : undefined,
+                dimensions: (c.dimensions || []).map(d => ({
+                    name: String(d.name || ''),
+                    sql: d.sql !== undefined ? String(d.sql) : undefined,
+                    type: d.type ? String(d.type) : undefined,
+                    primary_key: !!d.primary_key,
+                    shown: d.shown !== false,
+                    title: d.title ? String(d.title) : undefined,
+                })),
+                measures: (c.measures || []).map(m => ({
+                    name: String(m.name || ''),
+                    sql: m.sql !== undefined ? String(m.sql) : undefined,
+                    type: String(m.type || 'count'),
+                    filters: Array.isArray(m.filters)
+                        ? m.filters.map(f => ({ sql: String(f.sql || '') })).filter(f => f.sql)
+                        : undefined,
+                    title: m.title ? String(m.title) : undefined,
+                })),
+                joins: (c.joins || []).map(j => ({
+                    name: String(j.name || ''),
+                    relationship: String(j.relationship || 'many_to_one'),
+                    sql: String(j.sql || ''),
+                })),
+            };
+        }
+
+        function _normViewYaml(v) {
+            return {
+                name: String(v.name || ''),
+                cubes: (v.cubes || []).map(e => ({
+                    join_path: String(e.join_path || ''),
+                    includes: e.includes,
+                    excludes: Array.isArray(e.excludes) ? e.excludes.map(String) : undefined,
+                    prefix: e.prefix,
+                    alias: e.alias ? String(e.alias) : undefined,
+                })),
+            };
+        }
+
+        // JS parser
+        function _stripJsComments(text) {
+            let out = ''; let i = 0;
+            while (i < text.length) {
+                const ch = text[i]; const ch2 = text[i+1];
+                if (ch === '/' && ch2 === '*') { const end = text.indexOf('*/', i+2); if (end<0) break; i = end+2; continue; }
+                if (ch === '/' && ch2 === '/') { const eol = text.indexOf('\n', i); i = eol<0 ? text.length : eol; continue; }
+                if (ch === '`' || ch === '\'' || ch === '"') {
+                    const q = ch; out += ch; i++;
+                    while (i < text.length) {
+                        const c = text[i]; out += c;
+                        if (c === '\\' && i+1 < text.length) { out += text[i+1]; i += 2; continue; }
+                        if (q === '`' && c === '$' && text[i+1] === '{') {
+                            out += text[i+1]; i += 2;
+                            let depth = 1;
+                            while (i < text.length && depth > 0) {
+                                const cc = text[i]; out += cc;
+                                if (cc === '{') depth++; else if (cc === '}') depth--;
+                                i++;
+                            }
+                            continue;
+                        }
+                        i++;
+                        if (c === q) break;
+                    }
+                    continue;
+                }
+                out += ch; i++;
+            }
+            return out;
+        }
+
+        function _findTopLevelCubeCalls(text, fnNames) {
+            const out = [];
+            const fnRegex = new RegExp(`\\b(${fnNames.join('|')})\\s*\\(`, 'g');
+            let match;
+            while ((match = fnRegex.exec(text)) !== null) {
+                const fn = match[1];
+                let i = match.index + match[0].length;
+                while (i < text.length && /\s/.test(text[i])) i++;
+                if (i >= text.length) continue;
+                const q = text[i];
+                if (q !== '`' && q !== '\'' && q !== '"') continue;
+                i++;
+                let name = '';
+                while (i < text.length && text[i] !== q) {
+                    if (text[i] === '\\' && i+1 < text.length) { name += text[i+1]; i += 2; continue; }
+                    name += text[i++];
+                }
+                i++;
+                while (i < text.length && /[\s,]/.test(text[i])) i++;
+                if (text[i] !== '{') continue;
+                const start = i + 1; let depth = 1; i++;
+                while (i < text.length && depth > 0) {
+                    const c = text[i];
+                    if (c === '`' || c === '\'' || c === '"') { i = _skipJsString(text, i); continue; }
+                    if (c === '{') depth++; else if (c === '}') depth--;
+                    if (depth === 0) break;
+                    i++;
+                }
+                out.push({ kind: fn, name, body: text.slice(start, i) });
+            }
+            return out;
+        }
+
+        function _skipJsString(text, start) {
+            const q = text[start]; let i = start + 1;
+            while (i < text.length) {
+                const c = text[i];
+                if (c === '\\' && i+1 < text.length) { i += 2; continue; }
+                if (q === '`' && c === '$' && text[i+1] === '{') {
+                    i += 2; let depth = 1;
+                    while (i < text.length && depth > 0) {
+                        const cc = text[i];
+                        if (cc === '{') depth++; else if (cc === '}') depth--;
+                        i++;
+                    }
+                    continue;
+                }
+                if (c === q) return i + 1;
+                i++;
+            }
+            return i;
+        }
+
+        function _parseCubeJsObject(src) {
+            const wrapped = '{' + src + '}';
+            const p = { src: wrapped, i: 0 };
+            return _parseJsValue(p);
+        }
+        function _skipJsWs(p) {
+            while (p.i < p.src.length) {
+                const c = p.src[p.i];
+                if (/\s/.test(c)) { p.i++; continue; }
+                if (c === '/' && p.src[p.i+1] === '/') {
+                    const eol = p.src.indexOf('\n', p.i); p.i = eol<0 ? p.src.length : eol; continue;
+                }
+                if (c === '/' && p.src[p.i+1] === '*') {
+                    const end = p.src.indexOf('*/', p.i+2); p.i = end<0 ? p.src.length : end+2; continue;
+                }
+                break;
+            }
+        }
+        function _parseJsValue(p) {
+            _skipJsWs(p);
+            const c = p.src[p.i];
+            if (c === '{') return _parseJsObject2(p);
+            if (c === '[') return _parseJsArray(p);
+            if (c === '`' || c === '\'' || c === '"') return _parseJsString(p);
+            if (c === '-' || /[0-9]/.test(c)) return _parseJsNumber(p);
+            return _parseJsIdent(p);
+        }
+        function _parseJsObject2(p) {
+            p.i++; const obj = {}; _skipJsWs(p);
+            while (p.i < p.src.length && p.src[p.i] !== '}') {
+                const key = _parseJsKey(p); _skipJsWs(p);
+                if (p.src[p.i] !== ':') throw new Error(`expected ":" at ${p.i}`);
+                p.i++; _skipJsWs(p);
+                obj[key] = _parseJsValue(p); _skipJsWs(p);
+                if (p.src[p.i] === ',') { p.i++; _skipJsWs(p); }
+            }
+            if (p.src[p.i] !== '}') throw new Error(`expected "}" at ${p.i}`);
+            p.i++; return obj;
+        }
+        function _parseJsArray(p) {
+            p.i++; const out = []; _skipJsWs(p);
+            while (p.i < p.src.length && p.src[p.i] !== ']') {
+                out.push(_parseJsValue(p)); _skipJsWs(p);
+                if (p.src[p.i] === ',') { p.i++; _skipJsWs(p); }
+            }
+            if (p.src[p.i] !== ']') throw new Error(`expected "]" at ${p.i}`);
+            p.i++; return out;
+        }
+        function _parseJsKey(p) {
+            _skipJsWs(p);
+            const c = p.src[p.i];
+            if (c === '\'' || c === '"' || c === '`') return _parseJsString(p);
+            let key = '';
+            while (p.i < p.src.length && /[A-Za-z0-9_$]/.test(p.src[p.i])) key += p.src[p.i++];
+            if (!key) throw new Error(`expected key at ${p.i}`);
+            return key;
+        }
+        function _parseJsString(p) {
+            const q = p.src[p.i]; p.i++; let s = '';
+            while (p.i < p.src.length && p.src[p.i] !== q) {
+                const c = p.src[p.i];
+                if (c === '\\' && p.i+1 < p.src.length) {
+                    const n = p.src[p.i+1];
+                    s += (n === 'n' ? '\n' : n === 't' ? '\t' : n === 'r' ? '\r' : n);
+                    p.i += 2; continue;
+                }
+                if (q === '`' && c === '$' && p.src[p.i+1] === '{') {
+                    s += '${'; p.i += 2; let depth = 1;
+                    while (p.i < p.src.length && depth > 0) {
+                        const cc = p.src[p.i];
+                        if (cc === '{') depth++;
+                        else if (cc === '}') { depth--; if (depth === 0) { s += '}'; p.i++; break; } }
+                        s += cc; p.i++;
+                    }
+                    continue;
+                }
+                s += c; p.i++;
+            }
+            if (p.src[p.i] !== q) throw new Error(`unterminated string near ${p.i}`);
+            p.i++; return s;
+        }
+        function _parseJsNumber(p) {
+            let s = '';
+            if (p.src[p.i] === '-') s += p.src[p.i++];
+            while (p.i < p.src.length && /[0-9.eE+-]/.test(p.src[p.i])) s += p.src[p.i++];
+            return Number(s);
+        }
+        function _parseJsIdent(p) {
+            let s = '';
+            while (p.i < p.src.length && /[A-Za-z0-9_$.]/.test(p.src[p.i])) s += p.src[p.i++];
+            if (s === 'true') return true;
+            if (s === 'false') return false;
+            if (s === 'null') return null;
+            if (s === 'undefined') return undefined;
+            if (!s) throw new Error(`unexpected character at ${p.i}`);
+            return s;
+        }
+
+        function _parseCubeJs(text) {
+            const out = { cubes: [], views: [], preAggCount: 0, segmentCount: 0 };
+            const stripped = _stripJsComments(text);
+            for (const call of _findTopLevelCubeCalls(stripped, ['cube','view'])) {
+                try {
+                    const obj = _parseCubeJsObject(call.body);
+                    obj.name = call.name;
+                    if (call.kind === 'cube') {
+                        out.preAggCount += obj.pre_aggregations
+                            ? (Array.isArray(obj.pre_aggregations) ? obj.pre_aggregations.length : Object.keys(obj.pre_aggregations).length)
+                            : 0;
+                        out.segmentCount += obj.segments
+                            ? (Array.isArray(obj.segments) ? obj.segments.length : Object.keys(obj.segments).length)
+                            : 0;
+                        out.cubes.push(_normCubeJs(obj));
+                    } else {
+                        out.views.push(_normViewJs(obj));
+                    }
+                } catch (e) {
+                    throw new Error(`failed to parse ${call.kind}(${call.name}): ${e.message}`);
+                }
+            }
+            return out;
+        }
+
+        function _normCubeJs(obj) {
+            const dims = [];
+            if (obj.dimensions && typeof obj.dimensions === 'object' && !Array.isArray(obj.dimensions)) {
+                for (const [k, v] of Object.entries(obj.dimensions)) {
+                    dims.push({
+                        name: k,
+                        sql: v.sql !== undefined ? String(v.sql) : undefined,
+                        type: v.type ? String(v.type) : undefined,
+                        primary_key: !!v.primary_key,
+                        shown: v.shown !== false,
+                        title: v.title ? String(v.title) : undefined,
+                    });
+                }
+            }
+            const measures = [];
+            if (obj.measures && typeof obj.measures === 'object' && !Array.isArray(obj.measures)) {
+                for (const [k, v] of Object.entries(obj.measures)) {
+                    measures.push({
+                        name: k,
+                        sql: v.sql !== undefined ? String(v.sql) : undefined,
+                        type: String(v.type || 'count'),
+                        filters: Array.isArray(v.filters)
+                            ? v.filters.map(f => ({ sql: String(f.sql || '') })).filter(f => f.sql)
+                            : undefined,
+                        title: v.title ? String(v.title) : undefined,
+                    });
+                }
+            }
+            const joins = [];
+            if (obj.joins && typeof obj.joins === 'object' && !Array.isArray(obj.joins)) {
+                for (const [k, v] of Object.entries(obj.joins)) {
+                    joins.push({
+                        name: k,
+                        relationship: String(v.relationship || 'many_to_one'),
+                        sql: String(v.sql || ''),
+                    });
+                }
+            }
+            return {
+                name: obj.name,
+                sql_table: obj.sql_table ? String(obj.sql_table) : undefined,
+                sql: obj.sql ? String(obj.sql) : undefined,
+                title: obj.title ? String(obj.title) : undefined,
+                dimensions: dims, measures, joins,
+            };
+        }
+
+        function _normViewJs(obj) {
+            return {
+                name: obj.name,
+                cubes: Array.isArray(obj.cubes) ? obj.cubes.map(e => ({
+                    join_path: typeof e.join_path === 'string' ? e.join_path : String(e.join_path || ''),
+                    includes: e.includes,
+                    excludes: Array.isArray(e.excludes) ? e.excludes.map(String) : undefined,
+                    prefix: e.prefix,
+                    alias: e.alias ? String(e.alias) : undefined,
+                })) : [],
+            };
+        }
+
+        function _cubeBuildViewColumnRef(path, fieldName, headEntry, cubeRegistry) {
+            const dispField = sigmaDisplayName(fieldName);
+            if (path.length === 1) {
+                return `[${headEntry.element.name || sigmaDisplayName(headEntry.cubeDef.name)}/${dispField}]`;
+            }
+            let currentEntry = headEntry; const linkSegments = [];
+            for (let i = 1; i < path.length; i++) {
+                const nextName = path[i];
+                const join = currentEntry.cubeDef.joins?.find(j => j.name.toLowerCase() === nextName.toLowerCase());
+                if (!join) return null;
+                const refs = _cubeParseJoinSqlRefs(join.sql, currentEntry.cubeDef.name, join.name);
+                if (!refs) return null;
+                const fkCol = sigmaDisplayName(refs.fromCol);
+                if (i === 1) linkSegments.push(`${currentEntry.sourceTable}/${refs.fromCol.toUpperCase()} - link`);
+                else linkSegments.push(`${fkCol} - link`);
+                const next = cubeRegistry.get(nextName.toLowerCase());
+                if (!next) return null;
+                currentEntry = next;
+            }
+            return `[${linkSegments.join('/')}/${dispField}]`;
+        }
+
+        function _cubeBuildViewElement(view, cubeRegistry, warnings) {
+            const cubeEntries = view.cubes || [];
+            if (!cubeEntries.length) { warnings.push(`⚠ View "${view.name}" has no cubes[] — skipped.`); return null; }
+            const headPath = cubeEntries[0].join_path || '';
+            const headCubeName = headPath.split('.')[0];
+            const headEntry = cubeRegistry.get(headCubeName.toLowerCase());
+            if (!headEntry) { warnings.push(`⚠ View "${view.name}": head cube "${headCubeName}" not found — skipped.`); return null; }
+
+            const elementId = sigmaShortId();
+            const element = {
+                id: elementId, kind: 'table', name: sigmaDisplayName(view.name),
+                source: { kind: 'table', elementId: headEntry.elementId },
+                columns: [], metrics: [], order: [],
+            };
+            for (const entry of cubeEntries) {
+                const path = (entry.join_path || '').split('.').filter(Boolean);
+                if (!path.length) continue;
+                const cubePath = path.map(p => cubeRegistry.get(p.toLowerCase())).filter(Boolean);
+                if (!cubePath.length) {
+                    warnings.push(`⚠ View "${view.name}": join_path "${entry.join_path}" — no cubes found, skipped.`);
+                    continue;
+                }
+                const targetEntry = cubePath[cubePath.length - 1];
+                const includes = entry.includes;
+                const excludes = new Set((entry.excludes || []).map(s => s.toLowerCase()));
+                const dimsToInclude = []; const measuresToInclude = [];
+                if (includes === '*' || includes === undefined) {
+                    dimsToInclude.push(...(targetEntry.cubeDef.dimensions || []));
+                    measuresToInclude.push(...(targetEntry.cubeDef.measures || []));
+                } else if (Array.isArray(includes)) {
+                    const incLower = new Set(includes.map(i => typeof i === 'string' ? i.toLowerCase() : ''));
+                    for (const d of targetEntry.cubeDef.dimensions || []) if (incLower.has(d.name.toLowerCase())) dimsToInclude.push(d);
+                    for (const m of targetEntry.cubeDef.measures || []) if (incLower.has(m.name.toLowerCase())) measuresToInclude.push(m);
+                }
+                const prefix = entry.prefix === true ? `${path[path.length-1]}_`
+                    : (typeof entry.prefix === 'string' ? entry.prefix : '');
+                for (const d of dimsToInclude) {
+                    if (excludes.has(d.name.toLowerCase())) continue;
+                    const refFormula = _cubeBuildViewColumnRef(path, d.name, headEntry, cubeRegistry);
+                    if (!refFormula) continue;
+                    const cId = sigmaShortId();
+                    element.columns.push({ id: cId, formula: refFormula, name: prefix ? sigmaDisplayName(prefix + d.name) : sigmaDisplayName(d.name) });
+                    element.order.push(cId);
+                }
+                for (const m of measuresToInclude) {
+                    if (excludes.has(m.name.toLowerCase())) continue;
+                    if (path.length > 1) {
+                        warnings.push(`ℹ View "${view.name}": measure "${m.name}" on joined cube "${targetEntry.cubeDef.name}" skipped — add manually in Sigma UI as a linked metric.`);
+                        continue;
+                    }
+                    // Head-cube measures → copy formula to the view's metrics array.
+                    // The formula references columns by display name, which resolve via the view's passthrough columns.
+                    const sourceMetric = (targetEntry.element.metrics || []).find(mm => mm.name === (m.title || sigmaDisplayName(m.name)));
+                    if (!sourceMetric) continue;
+                    const dispName = prefix ? sigmaDisplayName(prefix + m.name) : (m.title || sigmaDisplayName(m.name));
+                    element.metrics.push({ id: sigmaShortId(), name: dispName, formula: sourceMetric.formula });
+                }
+            }
+            if (!element.columns.length && !element.metrics.length) {
+                warnings.push(`⚠ View "${view.name}" produced no columns or metrics — check cubes[].includes and join_path.`);
+                return null;
+            }
+            if (!element.metrics.length) delete element.metrics;
+            return element;
+        }
+
+        function convertCubeToSigma(files, connectionId, overrides = {}) {
+            const { database = '', schema = '' } = overrides;
+            const dbOverride = database.trim().toUpperCase();
+            const schemaOverride = schema.trim().toUpperCase();
+            const cubes = []; const views = []; const warnings = [];
+            let preAggCount = 0; let segmentCount = 0;
+
+            for (const f of files) {
+                try {
+                    const isJs = /\.(c?js|mjs)$/i.test(f.name);
+                    const parsed = isJs ? _parseCubeJs(f.content) : _parseCubeYaml(f.content);
+                    cubes.push(...parsed.cubes); views.push(...parsed.views);
+                    preAggCount += parsed.preAggCount; segmentCount += parsed.segmentCount;
+                } catch (e) {
+                    warnings.push(`${f.name}: parse error — ${e.message}`);
+                }
+            }
+
+            if (!cubes.length && !views.length) {
+                return {
+                    sigmaModel: { name: 'Cube Model', pages: [{ id: sigmaShortId(), name: 'Page 1', elements: [] }] },
+                    warnings: warnings.length ? warnings : ['No cubes or views found in the provided files'],
+                    stats: { cubes: 0, views: 0, totalDims: 0, totalMeasures: 0 },
+                };
+            }
+            if (preAggCount) warnings.push(`ℹ ${preAggCount} pre_aggregation${preAggCount !== 1 ? 's' : ''} skipped — Sigma uses warehouse-side caching, so these have no equivalent.`);
+            if (segmentCount) warnings.push(`ℹ ${segmentCount} segment${segmentCount !== 1 ? 's' : ''} skipped — Sigma has no direct equivalent for reusable segment filters.`);
+
+            const elements = [];
+            const cubeRegistry = new Map();
+            const conn = connectionId || '<CONNECTION_ID>';
+            let totalDims = 0, totalMeasures = 0, totalCalcDims = 0, totalCalcMeasures = 0;
+
+            for (const cube of cubes) {
+                const cubeName = cube.name;
+                const elementId = sigmaShortId();
+                let element, sourceTable, isCustomSql = false;
+
+                if (cube.sql_table) {
+                    const raw = cube.sql_table.replace(/"/g, '').trim();
+                    let path = raw.split('.').map(s => s.trim().toUpperCase()).filter(Boolean);
+                    if (path.length === 1) {
+                        if (dbOverride && schemaOverride) path = [dbOverride, schemaOverride, path[0]];
+                        else if (schemaOverride) path = [schemaOverride, path[0]];
+                        else if (dbOverride) path = [dbOverride, path[0]];
+                    } else if (path.length === 2 && dbOverride) path = [dbOverride, path[0], path[1]];
+                    sourceTable = path[path.length-1] || cubeName.toUpperCase();
+                    element = {
+                        id: elementId, kind: 'table', name: sigmaDisplayName(cubeName),
+                        source: { connectionId: conn, kind: 'warehouse-table', path },
+                        columns: [], metrics: [], order: [],
+                    };
+                } else if (cube.sql) {
+                    isCustomSql = true; sourceTable = 'Custom SQL';
+                    element = {
+                        id: elementId, kind: 'table', name: sigmaDisplayName(cubeName),
+                        source: { connectionId: conn, kind: 'sql', statement: _cubeTranslateRawSql(cube.sql, cubeName) },
+                        columns: [], metrics: [], order: [],
+                    };
+                    warnings.push(`ℹ "${cubeName}" → Custom SQL element. Review the SQL before saving.`);
+                } else {
+                    const path = dbOverride && schemaOverride
+                        ? [dbOverride, schemaOverride, cubeName.toUpperCase()]
+                        : [cubeName.toUpperCase()];
+                    sourceTable = path[path.length-1];
+                    element = {
+                        id: elementId, kind: 'table', name: sigmaDisplayName(cubeName),
+                        source: { connectionId: conn, kind: 'warehouse-table', path },
+                        columns: [], metrics: [], order: [],
+                    };
+                    warnings.push(`⚠ "${cubeName}" has no sql_table or sql — assuming table named ${sourceTable}.`);
+                }
+
+                const colIdMap = {}; let pkColId = null;
+                function addCol(fieldName, formula, label) {
+                    const id = isCustomSql ? sigmaShortId() : sigmaInodeId(fieldName.toUpperCase());
+                    colIdMap[fieldName.toUpperCase()] = id;
+                    const col = { id, formula };
+                    if (label) col.name = label;
+                    element.columns.push(col); element.order.push(id);
+                    return id;
+                }
+
+                for (const dim of cube.dimensions || []) {
+                    if (dim.shown === false) continue;
+                    totalDims++;
+                    let formula;
+                    if (_cubeIsSimpleColumnRef(dim.sql)) {
+                        const physCol = _cubeExtractColumnName(dim.sql) || dim.name;
+                        formula = isCustomSql ? `[${sigmaDisplayName(physCol)}]` : sigmaColFormula(sourceTable, physCol);
+                    } else if (dim.sql) {
+                        const t = _cubeTranslateFormula(dim.sql, sourceTable, isCustomSql);
+                        if (t === null) {
+                            warnings.push(`⚠ "${cubeName}.${dim.name}": SQL could not be translated — skipped.`);
+                            totalDims--; continue;
+                        }
+                        formula = t; totalCalcDims++;
+                    } else {
+                        formula = isCustomSql ? `[${sigmaDisplayName(dim.name)}]` : sigmaColFormula(sourceTable, dim.name);
+                    }
+                    const colId = addCol(dim.name, formula, dim.title || undefined);
+                    if (dim.primary_key) pkColId = colId;
+                }
+
+                for (const measure of cube.measures || []) {
+                    if (!measure.name) continue;
+                    totalMeasures++;
+                    const type = (measure.type || 'count').toLowerCase();
+                    let formula;
+                    if (type === 'count' && !measure.sql) {
+                        if (pkColId) {
+                            const pkKey = Object.keys(colIdMap).find(k => colIdMap[k] === pkColId) || measure.name;
+                            formula = `CountIf(IsNotNull([${sigmaDisplayName(pkKey)}]))`;
+                        } else if (element.columns[0]) {
+                            const firstColKey = Object.keys(colIdMap)[0] || measure.name;
+                            formula = `CountIf(IsNotNull([${sigmaDisplayName(firstColKey)}]))`;
+                        } else {
+                            formula = `CountIf(IsNotNull([${sigmaDisplayName(measure.name)}]))`;
+                        }
+                    } else if (type === 'number' || type === 'percent') {
+                        const t = measure.sql ? _cubeTranslateMeasureExpr(measure.sql) : null;
+                        if (t === null) {
+                            warnings.push(`⚠ "${cubeName}.${measure.name}": calculated measure SQL could not be translated — skipped.`);
+                            totalMeasures--; continue;
+                        }
+                        formula = t; totalCalcMeasures++;
+                    } else if (measure.sql) {
+                        // Auto-add ${CUBE}.col refs from the measure SQL so the agg target exists on the element
+                        _cubeEnsureFilterCols(measure.sql, colIdMap, sourceTable, isCustomSql, addCol);
+                        let inner;
+                        if (_cubeIsSimpleColumnRef(measure.sql)) {
+                            const physCol = _cubeExtractColumnName(measure.sql) || measure.name;
+                            inner = `[${sigmaDisplayName(physCol)}]`;
+                        } else {
+                            const t = _cubeTranslateFormula(measure.sql, sourceTable, isCustomSql) || measure.sql;
+                            inner = t.replace(/\[([^/\]]+)\/([^\]]+)\]/g, '[$2]');
+                        }
+                        formula = _cubeWrapAgg(type, inner);
+                        if (measure.filters?.length) {
+                            // Auto-add columns referenced by filter SQL — without this,
+                            // [Is Active] = 1 resolves to nothing and the metric returns null.
+                            for (const f of measure.filters) _cubeEnsureFilterCols(f.sql, colIdMap, sourceTable, isCustomSql, addCol);
+                            const condParts = measure.filters
+                                .map(f => _cubeTranslateFormula(f.sql, sourceTable, isCustomSql))
+                                .filter(Boolean);
+                            if (condParts.length) {
+                                const cond = condParts.length === 1 ? condParts[0] : condParts.map(c => `(${c})`).join(' And ');
+                                const condStripped = cond.replace(/\[([^/\]]+)\/([^\]]+)\]/g, '[$2]');
+                                formula = _cubeWrapAggIf(type, inner, condStripped);
+                            }
+                        }
+                    } else {
+                        formula = _cubeWrapAgg(type, `[${sigmaDisplayName(measure.name)}]`);
+                    }
+                    const metricId = sigmaShortId();
+                    colIdMap[measure.name.toUpperCase()] = metricId;
+                    (element.metrics ??= []).push({
+                        id: metricId,
+                        name: measure.title || sigmaDisplayName(measure.name),
+                        formula,
+                    });
+                }
+
+                elements.push(element);
+                cubeRegistry.set(cubeName.toLowerCase(), { elementId, pkColId, colIdMap, element, sourceTable, cubeDef: cube, isCustomSql });
+            }
+
+            // Joins → relationships
+            let totalRels = 0;
+            for (const cube of cubes) {
+                const fromEntry = cubeRegistry.get(cube.name.toLowerCase());
+                if (!fromEntry) continue;
+                for (const join of cube.joins || []) {
+                    const toEntry = cubeRegistry.get(join.name.toLowerCase());
+                    if (!toEntry) {
+                        warnings.push(`Join "${cube.name} → ${join.name}": target cube not found — skipping`);
+                        continue;
+                    }
+                    let srcColId = null, tgtColId = null;
+                    if (join.sql) {
+                        const refs = _cubeParseJoinSqlRefs(join.sql, cube.name, join.name);
+                        if (refs) {
+                            srcColId = fromEntry.colIdMap[refs.fromCol.toUpperCase()] ?? null;
+                            tgtColId = toEntry.colIdMap[refs.toCol.toUpperCase()] ?? null;
+                            if (!srcColId && fromEntry.element.source?.kind === 'warehouse-table') {
+                                const newId = sigmaInodeId(refs.fromCol.toUpperCase());
+                                fromEntry.colIdMap[refs.fromCol.toUpperCase()] = newId;
+                                fromEntry.element.columns.push({ id: newId, formula: sigmaColFormula(fromEntry.sourceTable, refs.fromCol) });
+                                fromEntry.element.order.push(newId);
+                                srcColId = newId;
+                            }
+                            if (!tgtColId && toEntry.element.source?.kind === 'warehouse-table') {
+                                const newId = sigmaInodeId(refs.toCol.toUpperCase());
+                                toEntry.colIdMap[refs.toCol.toUpperCase()] = newId;
+                                toEntry.element.columns.push({ id: newId, formula: sigmaColFormula(toEntry.sourceTable, refs.toCol) });
+                                toEntry.element.order.push(newId);
+                                tgtColId = newId;
+                            }
+                        }
+                    }
+                    const relType = join.relationship === 'one_to_many' ? '1:N'
+                        : join.relationship === 'one_to_one' ? '1:1' : 'N:1';
+                    const rel = {
+                        id: sigmaShortId(),
+                        targetElementId: toEntry.elementId,
+                        name: `${sigmaDisplayName(cube.name)} to ${sigmaDisplayName(join.name)}`,
+                        relationshipType: relType,
+                    };
+                    if (srcColId && tgtColId) rel.keys = [{ sourceColumnId: srcColId, targetColumnId: tgtColId }];
+                    else warnings.push(`Join "${cube.name} → ${join.name}": could not resolve column keys from sql=${join.sql || '(missing)'} — relationship added without key mapping`);
+                    (fromEntry.element.relationships ??= []).push(rel);
+                    totalRels++;
+                }
+            }
+
+            // Views → derived elements
+            let viewElementCount = 0;
+            for (const view of views) {
+                const ve = _cubeBuildViewElement(view, cubeRegistry, warnings);
+                if (ve) { elements.push(ve); viewElementCount++; }
+            }
+
+            for (const el of elements) {
+                if (el.metrics?.length === 0) delete el.metrics;
+                if (el.relationships?.length === 0) delete el.relationships;
+            }
+
+            const modelName = cubes.length === 1 && views.length === 0
+                ? sigmaDisplayName(cubes[0].name)
+                : 'Cube Model';
+
+            return {
+                sigmaModel: { name: modelName, pages: [{ id: sigmaShortId(), name: 'Page 1', elements }] },
+                warnings,
+                stats: {
+                    cubes: cubes.length, views: views.length, elements: elements.length,
+                    columns: elements.reduce((s, e) => s + (e.columns?.length || 0), 0),
+                    metrics: elements.reduce((s, e) => s + (e.metrics?.length || 0), 0),
+                    relationships: totalRels,
+                    viewElements: viewElementCount,
+                    totalDims, totalMeasures,
+                    calculatedDims: totalCalcDims, calculatedMeasures: totalCalcMeasures,
+                    preAggregationsSkipped: preAggCount, segmentsSkipped: segmentCount,
+                },
+            };
+        }
+
+
 </script>
 </body>
 </html>

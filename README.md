@@ -1,6 +1,6 @@
 # Tableau → Sigma Converter (Local)
 
-A local Node.js proxy server that connects directly to your Tableau Server, downloads workbooks, converts them to Sigma data model JSON, and saves them to Sigma — no manual file export required.
+A local Node.js proxy server that connects directly to your Tableau Server, downloads workbooks AND Tableau Prep flows, converts them to Sigma data model JSON, and saves them to Sigma — no manual file export required.
 
 ## What is this?
 
@@ -8,10 +8,13 @@ The Tableau → Sigma Converter is a self-contained single-page app (`tableau-lo
 
 **Key capabilities:**
 
-- **Direct Tableau Server integration** — Authenticate with a Personal Access Token (PAT), browse workbooks by site, and download them with one click
-- **File upload** — Drag and drop or browse to upload a `.twb` / `.twbx` file if you prefer working offline
+- **Direct Tableau Server integration** — Authenticate with a Personal Access Token (PAT), browse workbooks AND Tableau Prep flows by site, download with one click
+- **Workbooks / Flows toggle** — Switch between content types on the connected site
+- **File upload** — Drag and drop or browse to upload `.twb` / `.twbx` / `.tds` / `.tdsx` / `.tfl` / `.tflx` files (multiple OK) if you prefer working offline
 - **Auto-connect** — Pre-configure server credentials via environment variables; the `⚡ Auto` button fills the form automatically
-- **Conversion** — Parses Tableau data sources (standard multi-table joins and the `type=collection` relationship model used by virtual connections) and produces a Sigma data model spec
+- **Workbook conversion** — Parses Tableau data sources (standard multi-table joins and the `type=collection` relationship model used by virtual connections)
+- **Tableau Prep conversion** — Parses `.tfl`/`.tflx` flows: inputs (LoadSql/LoadCsv/LoadExcel/LoadJson/LoadHyper/LoadGoogle), containers, transforms (AddColumn / RemoveColumns / RenameColumn / Remap / FilterOperation / ChangeColumnType), SuperJoin / SuperUnion / SuperAggregate
+- **`LoadSqlProxy` auto-resolver** — When a Prep flow has Tableau Server published-datasource inputs, the converter automatically fetches the matching `.tdsx` from the same Tableau site, extracts the inner `.tds` XML, and replaces the Custom SQL stub with the underlying warehouse table or `SELECT` body — no manual file uploads required
 - **Formula conversion** — Converts Tableau calculated field formulas to Sigma equivalents
 - **Save to Sigma** — Authenticates to Sigma, lets you pick a workspace/folder, and saves the converted data model via the Sigma REST API
 - **Warning surface** — Conversion warnings (unsupported patterns, skipped fields) are shown inline before saving
