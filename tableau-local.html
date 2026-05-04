@@ -1366,11 +1366,12 @@ function ingestTableauXml(xml, filename) {
         if (ds.getAttribute('name') === 'Parameters') {
             for (const col of ds.querySelectorAll(':scope > column')) {
                 const colName    = col.getAttribute('caption') || col.getAttribute('name') || '';
+                const rawName    = (col.getAttribute('name') || '').replace(/^\[|\]$/g, '');
                 const colType    = col.getAttribute('datatype') || 'string';
                 const domainType = col.getAttribute('param-domain-type') || 'all';
                 const members    = Array.from(col.querySelectorAll('member')).map(m => m.getAttribute('value')).filter(Boolean);
                 const calcEl     = col.querySelector('calculation');
-                parameters.push({ name: colName.replace(/^\[|\]$/g,''), type: colType, domainType, members, defaultVal: calcEl ? calcEl.getAttribute('formula') : '' });
+                parameters.push({ name: colName.replace(/^\[|\]$/g,''), rawName, type: colType, domainType, members, defaultVal: calcEl ? calcEl.getAttribute('formula') : '' });
             }
             continue;
         }
@@ -1490,6 +1491,52 @@ function tableauParseLOD(formula) {
     sigmaAgg = sigmaAgg.replace(/\[([A-Z][A-Z0-9_]{2,})\]/g, (m, c) => '[' + sigmaDisplayName(c) + ']');
     sigmaAgg = sigmaAgg.replace(/'([^']*)'/g, '"$1"');
     return { lodType, dims, sigmaAgg, aggFunc, aggExpr };
+}
+
+// ── Tableau Top-N / Bottom-N Set parser ──────────────────────────────────
+// Parses <calculation class='categorical-set'> with a <groupfilter
+// function='end'> child (Tableau Top-N/Bottom-N set) into a structured form
+// so the converter can lower it to a kind:'sql' RANK helper element.
+function tableauParseTopNSet(calcEl, caption, setName) {
+    if (!calcEl || calcEl.getAttribute('class') !== 'categorical-set') return null;
+    const endFilter = calcEl.querySelector('groupfilter[function="end"]');
+    if (!endFilter) return null;
+    const rawDim    = endFilter.getAttribute('field') || '';
+    const rawCount  = endFilter.getAttribute('count') || '';
+    const rawCtl    = endFilter.getAttribute('count-control') || '';
+    const direction = (endFilter.getAttribute('direction') || 'top').toLowerCase();
+    const dimField  = rawDim.replace(/^\[|\]$/g, '').trim().toUpperCase();
+    if (!dimField) return null;
+    let count = null, countControl = null;
+    if (rawCount) count = parseInt(rawCount, 10);
+    else if (rawCtl) countControl = rawCtl.replace(/^\[|\]$/g, '').trim();
+    if (count === null && countControl === null) return null;
+    let byField = '', byAggFunc = 'SUM';
+    const partitionBy = [];
+    const aggNode = calcEl.querySelector('groupfilter[function="aggregation"]');
+    if (aggNode) {
+        const opField = aggNode.getAttribute('user:op-field') || aggNode.getAttribute('op-field') || '';
+        const op = (aggNode.getAttribute('user:op') || aggNode.getAttribute('op') || 'SUM').toUpperCase();
+        if (opField) byField = opField.replace(/^\[|\]$/g, '').trim().toUpperCase();
+        byAggFunc = op === 'COUNTD' ? 'COUNTD' : op;
+    }
+    for (const fNode of calcEl.querySelectorAll('groupfilter[function="filter"]')) {
+        const partRaw = fNode.getAttribute('user:partition-by') || fNode.getAttribute('partition-by') || '';
+        if (partRaw) {
+            const matches = partRaw.match(/\[[^\]]+\]/g) || [];
+            for (const m of matches) partitionBy.push(m.replace(/^\[|\]$/g, '').trim().toUpperCase());
+        }
+    }
+    if (!byField) return null;
+    return { _isTopN: true, setName, caption, dimField, byField, byAggFunc, count, countControl, direction, partitionBy };
+}
+function _topNAlias(caption, used) {
+    let base = (caption || 'TOPN').toUpperCase().replace(/[^A-Z0-9_]+/g, '_').replace(/^_+|_+$/g, '').replace(/_+/g, '_');
+    if (!base) base = 'TOPN';
+    let a = base, n = 2;
+    while (used.has(a)) a = base + '_' + (n++);
+    used.add(a);
+    return a;
 }
 
 // ── Tableau window/table-calc parser ─────────────────────────────────────
@@ -2082,6 +2129,11 @@ function runTableauConversion() {
                 (e.columns||[]).length > (best.columns||[]).length ? e : best
             , elements[0]);
 
+        // Hoisted so the parameters→controls loop (outside if-factEl) can
+        // detect Top-N parameters that need a number control instead of the
+        // default number-range one.
+        const _topNParamControls = {};
+
         if (factEl) {
             const factColIdMap = {};
             (factEl.columns || []).forEach(c => {
@@ -2366,6 +2418,116 @@ function runTableauConversion() {
                 }
             };
 
+            // ── Top-N / Bottom-N Set helper-element registry (kind:sql) ─
+            const _topNHelpers = [];
+            const _topNUsedAliases = new Set();
+            const _topNSetIndex = {};
+            const _emitTopNHelper = (top) => {
+                const keyResolved = _resolveLodDim(top.dimField);
+                if (!keyResolved || !keyResolved.baseColId) {
+                    warnings.push('⚠ Set "' + top.caption + '": ranking key [' + top.dimField + '] not on base; skipped.');
+                    return false;
+                }
+                const partResolved = [];
+                for (const p of top.partitionBy) {
+                    const r = _resolveLodDim(p);
+                    if (!r || !r.baseColId) {
+                        warnings.push('⚠ Set "' + top.caption + '": partition dim [' + p + '] not on base; skipped.');
+                        return false;
+                    }
+                    partResolved.push(r);
+                }
+                let nLiteral, controlId = null;
+                if (top.count !== null) {
+                    nLiteral = String(top.count);
+                } else if (top.countControl) {
+                    const param = ((_tableauParsed && _tableauParsed.parameters) || []).find(p =>
+                        p.name.toUpperCase() === top.countControl.toUpperCase()
+                        || (p.rawName && p.rawName.toUpperCase() === top.countControl.toUpperCase())
+                        || sigmaDisplayName(p.name).toUpperCase() === sigmaDisplayName(top.countControl).toUpperCase()
+                    );
+                    const ctlSourceName = (param && param.name) || top.countControl;
+                    const cidBase = sigmaDisplayName(ctlSourceName).replace(/\s+/g, '-');
+                    controlId = cidBase;
+                    const defaultVal = parseInt((param && param.defaultVal) || '10', 10) || 10;
+                    if (param) _topNParamControls[param.name] = { controlId: cidBase, defaultVal };
+                    _topNParamControls[top.countControl] = { controlId: cidBase, defaultVal };
+                    nLiteral = '[' + cidBase + ']';
+                } else {
+                    warnings.push('⚠ Set "' + top.caption + '": no count or count-control; skipped.');
+                    return false;
+                }
+                const dirSql = top.direction === 'bottom' ? 'ASC' : 'DESC';
+                _topNAlias(top.caption, _topNUsedAliases);
+                const helperId = sigmaShortId();
+                const cols = [], order = [];
+                const keyColId = sigmaShortId();
+                cols.push({ id: keyColId, formula: '[Custom SQL/' + keyResolved.dimUpper + ']', name: keyResolved.displayName });
+                order.push(keyColId);
+                const partColIds = [];
+                for (const p of partResolved) {
+                    const pid = sigmaShortId();
+                    cols.push({ id: pid, formula: '[Custom SQL/' + p.dimUpper + ']', name: p.displayName });
+                    order.push(pid);
+                    partColIds.push(pid);
+                }
+                const totalColId = sigmaShortId();
+                cols.push({ id: totalColId, formula: '[Custom SQL/TOTAL]', name: top.caption + ' Total' });
+                order.push(totalColId);
+                const rnkColId = sigmaShortId();
+                const rankColName = top.caption + ' Rank';
+                cols.push({ id: rnkColId, formula: '[Custom SQL/RNK]', name: rankColName });
+                order.push(rnkColId);
+                const isTopNColId = sigmaShortId();
+                const isTopNName = top.caption + ' ' + (top.direction === 'bottom' ? 'Bottom' : 'Top') + ' N';
+                let isTopNFormula, emitIsTopNInSql = false;
+                if (controlId) {
+                    isTopNFormula = '[' + rankColName + '] <= [' + controlId + ']';
+                } else {
+                    isTopNFormula = '[Custom SQL/IS_TOP_N]';
+                    emitIsTopNInSql = true;
+                }
+                cols.push({ id: isTopNColId, formula: isTopNFormula, name: isTopNName });
+                order.push(isTopNColId);
+                const baseFq = (factEl.source && factEl.source.path && factEl.source.path.length >= 2)
+                    ? factEl.source.path.join('.') : factTableName;
+                const groupCols = [keyResolved.dimUpper].concat(partResolved.map(p => p.dimUpper));
+                const groupByIdx = groupCols.map((_g, i) => i + 1).join(', ');
+                let aggSql = top.byAggFunc;
+                if (aggSql === 'COUNTD') aggSql = 'COUNT(DISTINCT ' + top.byField + ')';
+                else aggSql = aggSql + '(' + top.byField + ')';
+                const partBy = top.partitionBy.length > 0 ? 'PARTITION BY ' + top.partitionBy.join(', ') + ' ' : '';
+                const overClause = 'RANK() OVER (' + partBy + 'ORDER BY s ' + dirSql + ')';
+                const innerSelect = 'SELECT ' + groupCols.join(', ') + ', ' + aggSql + ' AS s FROM ' + baseFq + ' GROUP BY ' + groupByIdx;
+                const rankedSelect = 'SELECT ' + groupCols.join(', ') + ', s, ' + overClause + ' AS RNK FROM agg';
+                const outerCols = emitIsTopNInSql
+                    ? (groupCols.join(', ') + ', s AS TOTAL, RNK, (RNK <= ' + nLiteral + ') AS IS_TOP_N')
+                    : (groupCols.join(', ') + ', s AS TOTAL, RNK');
+                const outerSelect = 'SELECT ' + outerCols + ' FROM ranked';
+                const statement = 'WITH agg AS (' + innerSelect + '), ranked AS (' + rankedSelect + ') ' + outerSelect;
+                const helperEl = {
+                    id: helperId, kind: 'table',
+                    name: top.caption + ' Top-N Helper',
+                    source: { connectionId: connectionId, kind: 'sql', statement },
+                    columns: cols, order
+                };
+                if (!factEl.relationships) factEl.relationships = [];
+                const relName = factTableName + '_TOPN_' + (top.caption.toUpperCase().replace(/[^A-Z0-9_]+/g, '_').replace(/^_|_$/g, ''));
+                const relKeys = [{ sourceColumnId: keyResolved.baseColId, targetColumnId: keyColId }];
+                for (let i = 0; i < partResolved.length; i++) {
+                    if (partResolved[i].baseColId) relKeys.push({ sourceColumnId: partResolved[i].baseColId, targetColumnId: partColIds[i] });
+                }
+                factEl.relationships.push({ id: sigmaShortId(), targetElementId: helperEl.id, keys: relKeys, name: relName });
+                _topNHelpers.push({ element: helperEl, isTopNColId, relationshipName: relName });
+                const idx = { helperEl, relName, isTopNColId };
+                _topNSetIndex[top.setName.toUpperCase()] = idx;
+                _topNSetIndex[top.caption.toUpperCase()] = idx;
+                const nDesc = top.count !== null ? top.count : ('[' + top.countControl + ']');
+                const partDesc = top.partitionBy.length ? (' per ' + top.partitionBy.join(',')) : '';
+                warnings.push('✅ Set "' + top.caption + '" (' + top.direction.toUpperCase() + '-' + nDesc + partDesc + ') → kind:sql RANK helper');
+                return true;
+            };
+
             for (const col of ds.element.querySelectorAll(':scope > column')) {
                 const rawName  = col.getAttribute('name') || '';
                 const caption  = col.getAttribute('caption') || rawName.replace(/^\[|\]$/g,'');
@@ -2396,9 +2558,10 @@ function runTableauConversion() {
 
                 if (calcEl && calcEl.getAttribute('class') === 'categorical-set') {
                     const setFormula = (calcEl.getAttribute('formula') || '').trim();
-                    const topFilter  = calcEl.querySelector('groupfilter[function="end"], groupfilter[function="top"]');
-                    if (topFilter) {
-                        warnings.push('⚠ Set "' + caption + '": Top N set → skip. Recreate in Sigma.');
+                    // Top-N / Bottom-N set → kind:'sql' RANK helper element + relationship
+                    const topN = tableauParseTopNSet(calcEl, caption, fieldKey);
+                    if (topN) {
+                        _emitTopNHelper(topN);
                         continue;
                     }
                     let sigmaSetFormula = null;
@@ -2607,6 +2770,10 @@ function runTableauConversion() {
                 for (const child of lodChildElements) { delete child._dimKey; elements.push(child); }
                 warnings.push('ℹ ' + lodChildElements.length + ' LOD helper element' + (lodChildElements.length!==1?'s':'') + ' created');
             }
+            if (_topNHelpers.length > 0) {
+                for (const rec of _topNHelpers) elements.push(rec.element);
+                warnings.push('ℹ ' + _topNHelpers.length + ' Top-N helper element' + (_topNHelpers.length!==1?'s':'') + ' created (kind:sql)');
+            }
             if (setColIds.length > 0) {
                 if (!factEl.folders) factEl.folders = [];
                 const setFolderId = sigmaShortId();
@@ -2639,6 +2806,20 @@ function runTableauConversion() {
         const controls = [];
         for (const p of _tableauParsed.parameters) {
             const controlId = sigmaDisplayName(p.name).replace(/\s+/g,'-');
+            // Top-N parameter: emit a single-number control with the Tableau
+            // default value. (The Top-N IS_TOP_N calc col references this
+            // control by id.)
+            if (_topNParamControls[p.name]) {
+                const def = _topNParamControls[p.name];
+                const defVal = parseInt(p.defaultVal || String(def.defaultVal), 10) || def.defaultVal;
+                controls.push({
+                    kind: 'control', controlId: def.controlId, id: sigmaShortId() + 'con',
+                    controlType: 'number', mode: '<=', value: defVal,
+                    includeNulls: 'when-no-value-is-selected'
+                });
+                warnings.push('ℹ Parameter "' + p.name + '" → number control (Top-N driver, default ' + defVal + ')');
+                continue;
+            }
             if (p.domainType === 'list' && p.members.length > 0) {
                 controls.push({ kind:'control', controlId, id: sigmaShortId()+'con',
                     controlType:'list', mode:'include', selectionMode:'single', values:[],

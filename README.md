@@ -114,6 +114,7 @@ When `TABLEAU_SERVER`, `TABLEAU_PAT_NAME`, and `TABLEAU_PAT_SECRET` are all set,
 | Bins | `Floor()` bucketed calculated columns |
 | LOD FIXED / INCLUDE / EXCLUDE | `kind:sql` helper element per unique GROUP BY signature + relationship from the base element. View dims for INCLUDE/EXCLUDE come from worksheet rows/cols shelves. Multiple LODs sharing a signature share one helper. |
 | Window / table calcs (`RUNNING_SUM`, `RUNNING_AVG/MIN/MAX`, `WINDOW_SUM/AVG/MIN/MAX/COUNT`, `LOOKUP`, `PREVIOUS_VALUE`, `RANK`, `RANK_DENSE`, `RANK_UNIQUE`, `INDEX`, `FIRST`, `LAST`) | `kind:sql` helper element with explicit Snowflake `OVER()` clauses (Sigma DM has no working partitioned/ordered window formulas). Partition keys come from worksheet `rows` shelves; order keys from time-truncated `cols` shelves. Multiple window calcs sharing the same partition+order share a single helper. |
+| Top N / Bottom N sets (global, parameterized, partitioned) | `kind:sql` RANK helper element with `WITH agg AS (...), ranked AS (...) SELECT ... FROM ranked` + relationship from the base on the dim key (and partition cols, if any). Helper exposes an `IS_TOP_N` boolean. Literal-N sets compute the boolean inline (`(rnk <= N) AS IS_TOP_N`); parameter-driven N emits a Sigma calc col formula `[Rank] <= [Control]` and a number control with the Tableau parameter's default value. Bottom-N swaps `DESC` → `ASC`. |
 
 ### Formula Conversion
 
@@ -175,7 +176,6 @@ When `TABLEAU_SERVER`, `TABLEAU_PAT_NAME`, and `TABLEAU_PAT_SECRET` are all set,
 - **Post-create validation** — After saving, call `GET /v2/dataModels/{id}/columns` and inspect for `type.type === "error"` entries. Both LOD and window helpers can post as success even if a referenced column is missing; only this endpoint surfaces the column-level error.
 - **Data blending** — Multi-connection workbooks are not supported; each data source is converted independently.
 - **Extracts (`.hyper`)** — Extract-only fields and extract filters are not converted.
-- **Top N / Bottom N sets** — Cannot be auto-converted; recreate as filters in the Sigma UI.
 - **Custom SQL with Tableau-specific syntax** — Converted to custom SQL elements; syntax that is not valid Snowflake SQL may need manual adjustment.
 - **Virtual connection TWBs** — Physical Snowflake column names are replaced by UUIDs in the TWB. The converter reads all `<metadata-record class='column'>` elements in the workbook to resolve UUIDs to human-readable captions. Columns not referenced in the workbook will not appear in the output — visit the virtual connection's datasource in Tableau to verify the full column list.
 
