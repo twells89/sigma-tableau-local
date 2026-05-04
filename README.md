@@ -113,6 +113,7 @@ When `TABLEAU_SERVER`, `TABLEAU_PAT_NAME`, and `TABLEAU_PAT_SECRET` are all set,
 | Sets | Boolean calculated columns |
 | Bins | `Floor()` bucketed calculated columns |
 | LOD FIXED / INCLUDE / EXCLUDE | `kind:sql` helper element per unique GROUP BY signature + relationship from the base element. View dims for INCLUDE/EXCLUDE come from worksheet rows/cols shelves. Multiple LODs sharing a signature share one helper. |
+| Window / table calcs (`RUNNING_SUM`, `RUNNING_AVG/MIN/MAX`, `WINDOW_SUM/AVG/MIN/MAX/COUNT`, `LOOKUP`, `PREVIOUS_VALUE`, `RANK`, `RANK_DENSE`, `RANK_UNIQUE`, `INDEX`, `FIRST`, `LAST`) | `kind:sql` helper element with explicit Snowflake `OVER()` clauses (Sigma DM has no working partitioned/ordered window formulas). Partition keys come from worksheet `rows` shelves; order keys from time-truncated `cols` shelves. Multiple window calcs sharing the same partition+order share a single helper. |
 
 ### Formula Conversion
 
@@ -159,16 +160,19 @@ When `TABLEAU_SERVER`, `TABLEAU_PAT_NAME`, and `TABLEAU_PAT_SECRET` are all set,
 | `STR([n])` | `Text([n])` |
 | `INT([n])` | `Int([n])` |
 | `FLOAT([n])` | `Number([n])` |
-| `RUNNING_SUM([n])` | `CumulativeSum([n])` |
-| `RUNNING_COUNT([n])` | `CumulativeCount([n])` |
-| `RANK()` | `Rank([n])` |
-| `RANK_DENSE()` | `DenseRank([n])` |
-| `INDEX()` | `RowNumber()` |
+| `RUNNING_SUM(SUM([n]))` | `kind:sql` helper element with `SUM(n) OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` |
+| `WINDOW_SUM(SUM([n]))` | `kind:sql` helper with `SUM(n) OVER (PARTITION BY ...)` (full-partition agg, no ORDER BY) |
+| `LOOKUP(SUM([n]), -1)` | `kind:sql` helper with `LAG(n, 1) OVER (PARTITION BY ... ORDER BY ...)` |
+| `RANK()` | `kind:sql` helper with `RANK() OVER (PARTITION BY ... ORDER BY measure DESC)` |
+| `RANK_DENSE()` | `kind:sql` helper with `DENSE_RANK() OVER (...)` |
+| `INDEX()` | `kind:sql` helper with `ROW_NUMBER() OVER (...)` |
 
 ### Known Limitations
 
 - **LOD INCLUDE / EXCLUDE without worksheet context** — When a calc is not placed on any worksheet's rows/cols shelf, the converter cannot derive the view dimensions and the LOD is skipped with a warning. Place the calc on at least one worksheet so the converter can determine the effective grouping.
-- **Complex table calculations** — `LOOKUP`, `PREVIOUS_VALUE`, `WINDOW_SUM`, `WINDOW_AVG` are flagged but not converted.
+- **Window calc partition/order heuristic** — Partition dims are derived from rows shelves; order dims from time-truncated cols shelves (`mn:`/`yr:`/`qr:`/`dy:` prefixes). Other Tableau "Compute Using" addressing modes (Pane, Cell, Specific Dimensions) are not yet parsed; if the heuristic mis-derives the grouping, edit the helper element's SQL after import.
+- **Window helper grain** — Window-helper SQL uses `DATE_TRUNC('month', ...)` as the default order grain. If your worksheet uses year/quarter/day grain, edit the SQL after import.
+- **Post-create validation** — After saving, call `GET /v2/dataModels/{id}/columns` and inspect for `type.type === "error"` entries. Both LOD and window helpers can post as success even if a referenced column is missing; only this endpoint surfaces the column-level error.
 - **Data blending** — Multi-connection workbooks are not supported; each data source is converted independently.
 - **Extracts (`.hyper`)** — Extract-only fields and extract filters are not converted.
 - **Top N / Bottom N sets** — Cannot be auto-converted; recreate as filters in the Sigma UI.
