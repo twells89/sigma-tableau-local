@@ -1574,12 +1574,48 @@ function tableauParseWindow(formula) {
 // Worksheet view-dim index: separately tracks rowsDims, colsDims, and dateDim
 // so the converter can derive PARTITION BY / ORDER BY heuristically from the
 // rows/cols shelves (rows=PARTITION, time-prefixed cols=ORDER).
+function _tableauPrefixToDateTrunc(prefix) {
+    if (!prefix) return null;
+    switch (String(prefix).toLowerCase()) {
+        case 'yr': return 'year';
+        case 'qr': return 'quarter';
+        case 'mn': return 'month';
+        case 'wk': return 'week';
+        case 'dy': return 'day';
+        case 'md': return 'day';
+        default: return null;
+    }
+}
+// Parse <calculation>'s <table-calculation> child for explicit "Compute Using"
+// addressing override. Returns null when no override is present (caller falls
+// back to rows/cols heuristic). See MCP tableau.ts for parity.
+function _tableauParseWindowAddressing(calcEl) {
+    if (!calcEl || !calcEl.querySelector) return null;
+    const tc = calcEl.querySelector(':scope > table-calculation');
+    if (!tc) return null;
+    const direction = (tc.getAttribute('direction') || '').toLowerCase();
+    const scope = (tc.getAttribute('scope') || '').toLowerCase();
+    const addresses = tc.querySelectorAll(':scope > address');
+    const orderFields = [];
+    for (const a of addresses) {
+        const refName = a.getAttribute('ref-name') || '';
+        const cleaned = refName.replace(/^\[|\]$/g, '');
+        const colonStripped = cleaned.match(/^(?:yr|mn|qr|dy|wk|md):([^:]+)(?::[a-z]{2})?$/i);
+        const bare = colonStripped ? colonStripped[1] : cleaned;
+        if (bare) orderFields.push(bare.toUpperCase());
+    }
+    if (orderFields.length > 0) return { mode: 'specific', orderFields, rawDirection: direction || undefined };
+    if (scope === 'pane' || scope === 'cell') return { mode: 'unknown', orderFields: [], rawDirection: scope + '/' + direction };
+    if (direction === 'right' || direction === 'left') return { mode: 'table-across', orderFields: [], rawDirection: direction };
+    if (direction === 'down' || direction === 'up') return { mode: 'table-down', orderFields: [], rawDirection: direction };
+    return null;
+}
 function _tableauBuildWindowWorksheetIndex(doc) {
     const byField = new Map();
     if (!doc || !doc.querySelectorAll) return { byField };
     const worksheets = doc.querySelectorAll('worksheets > worksheet');
     for (const ws of worksheets) {
-        const rowRefs = [], colRefs = []; let dateDim = null;
+        const rowRefs = [], colRefs = []; let dateDim = null; let dateGrain = null;
         ws.querySelectorAll(':scope > table > rows').forEach(n => {
             for (const r of _tableauExtractFieldRefsFromShelf(n.textContent || '')) rowRefs.push(r.toUpperCase());
         });
@@ -1589,8 +1625,11 @@ function _tableauBuildWindowWorksheetIndex(doc) {
             while ((mm = re.exec(text)) !== null) {
                 const inner = mm[1];
                 const colon = inner.match(/^(yr|mn|qr|dy|wk|md):([^:]+):[a-z]{2}$/i);
-                if (colon) { dateDim = colon[2].toUpperCase(); colRefs.push(dateDim); }
-                else { const c2 = inner.match(/^[a-z]{2,5}:([^:]+):[a-z]{2}$/i); colRefs.push((c2 ? c2[1] : inner).toUpperCase()); }
+                if (colon) {
+                    dateDim = colon[2].toUpperCase();
+                    dateGrain = _tableauPrefixToDateTrunc(colon[1]);
+                    colRefs.push(dateDim);
+                } else { const c2 = inner.match(/^[a-z]{2,5}:([^:]+):[a-z]{2}$/i); colRefs.push((c2 ? c2[1] : inner).toUpperCase()); }
             }
         });
         const dimFields = new Set();
@@ -1605,7 +1644,7 @@ function _tableauBuildWindowWorksheetIndex(doc) {
         const usedFields = new Set([...rowRefs, ...colRefs]);
         for (const used of usedFields) {
             const list = byField.get(used) || [];
-            list.push({ rowsDims: rowsDims.slice(), colsDims: colsDims.slice(), allDims, dateDim });
+            list.push({ rowsDims: rowsDims.slice(), colsDims: colsDims.slice(), allDims, dateDim, dateGrain });
             byField.set(used, list);
         }
     }
@@ -2612,9 +2651,36 @@ function runTableauConversion() {
                         for (const c of ctxList) { if (c.rowsDims.length > 0 && c.dateDim) { chosen = c; break; } }
                         if (!chosen) for (const c of ctxList) { if (c.rowsDims.length > 0) { chosen = c; break; } }
                         if (!chosen && ctxList.length > 0) chosen = ctxList[0];
-                        const partitionDimNames = chosen ? chosen.rowsDims.slice() : [];
+                        let partitionDimNames = chosen ? chosen.rowsDims.slice() : [];
                         let orderDimRaw = chosen ? (chosen.dateDim || (chosen.colsDims[0] || null)) : null;
-                        let orderDimDateTrunc = chosen && chosen.dateDim ? 'month' : null;
+                        // Use the cols-shelf prefix → DATE_TRUNC grain captured at index time
+                        // (yr→year, mn→month, qr→quarter, dy/md→day, wk→week). When no time
+                        // prefix was present, no DATE_TRUNC wrapper is emitted (raw column).
+                        let orderDimDateTrunc = chosen && chosen.dateDim ? (chosen.dateGrain != null ? chosen.dateGrain : null) : null;
+
+                        // Apply explicit "Compute Using" addressing override from
+                        // <calculation>'s <table-calculation> child if present.
+                        const _addressing = _tableauParseWindowAddressing(calcEl);
+                        if (_addressing) {
+                            if (_addressing.mode === 'specific' && _addressing.orderFields.length > 0) {
+                                const orderSet = new Set(_addressing.orderFields.map(s => s.toUpperCase()));
+                                const allShelfDims = chosen ? Array.from(new Set([...chosen.rowsDims, ...chosen.colsDims])) : [];
+                                partitionDimNames = allShelfDims.filter(d => !orderSet.has(d.toUpperCase()));
+                                const firstOrder = _addressing.orderFields[0];
+                                orderDimRaw = firstOrder;
+                                orderDimDateTrunc = (chosen && chosen.dateDim && firstOrder.toUpperCase() === chosen.dateDim.toUpperCase())
+                                    ? (chosen.dateGrain != null ? chosen.dateGrain : null)
+                                    : null;
+                                warnings.push('✅ Window calc "' + caption + '" — addressing override: order=[' + _addressing.orderFields.join(',') + '], partition=[' + partitionDimNames.join(',') + ']');
+                            } else if (_addressing.mode === 'table-down') {
+                                partitionDimNames = chosen ? chosen.colsDims.slice() : [];
+                                orderDimRaw = chosen && chosen.rowsDims.length > 0 ? chosen.rowsDims[0] : null;
+                                orderDimDateTrunc = null;
+                            } else if (_addressing.mode === 'unknown') {
+                                warnings.push('⚠ Window calc "' + caption + '" — Compute Using mode "' + _addressing.rawDirection + '" is not yet supported; falling back to rows/cols heuristic');
+                            }
+                            // 'table-across' is the rows/cols default; no change.
+                        }
 
                         const partitionResolved = []; let allP = true;
                         for (const p of partitionDimNames) {
