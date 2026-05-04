@@ -350,6 +350,27 @@
   details summary::-webkit-details-marker { display: none; }
   details summary::before { content: '▶ '; font-size: 9px; }
   details[open] summary::before { content: '▼ '; }
+
+  /* ── Floating help button ────────────────────────── */
+  .help-fab {
+    position: fixed; bottom: 20px; left: 20px;
+    width: 40px; height: 40px; border-radius: 50%;
+    background: var(--accent); color: #fff;
+    border: 1px solid var(--border);
+    font-size: 18px; font-weight: 700;
+    cursor: pointer; z-index: 9998;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+    display: flex; align-items: center; justify-content: center;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+  .help-fab:hover { transform: translateY(-2px); box-shadow: 0 10px 24px rgba(0,0,0,0.5); }
+  .help-modal-box { width: 560px; max-height: 85vh; overflow-y: auto; }
+  .help-modal-box h4 { margin: 12px 0 6px; font-size: 13px; color: var(--text); }
+  .help-modal-box p, .help-modal-box li { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+  .help-modal-box ul, .help-modal-box ol { margin: 4px 0 8px 20px; padding: 0; }
+  .help-modal-box code { background: var(--bg-primary); padding: 1px 5px; border-radius: 3px; font-size: 11px; color: var(--text); }
+  .help-modal-box a { color: var(--accent); text-decoration: none; }
+  .help-modal-box a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -583,6 +604,63 @@ After converting:
 </div>
 
 <div class="toast-container" id="toastContainer"></div>
+
+<!-- ── Floating help button ─────────────────────────────────────────── -->
+<button class="help-fab" id="helpFab" onclick="openHelpModal()" title="Help & docs" aria-label="Help">?</button>
+
+<!-- ── Help modal ───────────────────────────────────────────────────── -->
+<div class="modal-overlay" id="helpModal" onclick="if(event.target===this)closeHelpModal()">
+  <div class="modal-box help-modal-box">
+    <div class="modal-title">Tableau → Sigma Converter — Quick Help</div>
+    <div>
+      <h4>Connect to Tableau</h4>
+      <ol>
+        <li>Click <strong>⚡ Auto</strong> to fill the form from server-side env vars (<code>TABLEAU_SERVER</code>, <code>TABLEAU_SITE</code>, <code>TABLEAU_PAT_NAME</code>, <code>TABLEAU_PAT_SECRET</code>) — set in <code>start.sh</code>.</li>
+        <li>Or fill <strong>Server URL</strong>, <strong>Site</strong>, <strong>PAT Name</strong>, <strong>PAT Secret</strong> manually and click <strong>Connect</strong>.</li>
+      </ol>
+
+      <h4>Convert a workbook or flow</h4>
+      <ol>
+        <li>Toggle <strong>📊 Workbooks</strong> or <strong>🔧 Flows</strong>, pick one, and click <strong>Load Selected</strong>. Or drag-drop a <code>.twb</code>/<code>.twbx</code>/<code>.tfl</code>/<code>.tflx</code> file.</li>
+        <li>Select the data source, the matching Sigma connection, and a join strategy.</li>
+        <li>Click <strong>Convert to Sigma JSON</strong> — review output + warnings.</li>
+      </ol>
+
+      <h4>Save to Sigma</h4>
+      <ol>
+        <li>Enter Sigma <strong>Client ID</strong>, <strong>Client Secret</strong>, and region.</li>
+        <li>Click <strong>Connect to Sigma</strong>, pick a workspace + folder, then <strong>Save to Sigma</strong>.</li>
+      </ol>
+
+      <h4>Known limitations</h4>
+      <ul>
+        <li>LOD <code>INCLUDE</code>/<code>EXCLUDE</code> not auto-converted — recreate as child elements.</li>
+        <li>Window calcs (<code>LOOKUP</code>, <code>WINDOW_SUM</code>, etc.) flagged but not converted.</li>
+        <li>Multi-connection data blending not supported (each datasource converts independently).</li>
+        <li>Top-N / Bottom-N sets — recreate as filters in Sigma.</li>
+      </ul>
+
+      <h4>More info</h4>
+      <ul>
+        <li>Full README: <a href="https://github.com/twells89/sigma-data-model-tool/blob/main/tableau-local/README.md" target="_blank" rel="noopener">README on GitHub</a></li>
+        <li>Local copy: <code>tableau-local/README.md</code> in this repo</li>
+        <li>Sigma API docs: <a href="https://help.sigmacomputing.com/reference/get-started-sigma-api" target="_blank" rel="noopener">help.sigmacomputing.com</a></li>
+        <li>Tableau REST API: <a href="https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api.htm" target="_blank" rel="noopener">help.tableau.com</a></li>
+      </ul>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" onclick="closeHelpModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+function openHelpModal() { document.getElementById('helpModal').classList.add('active'); }
+function closeHelpModal() { document.getElementById('helpModal').classList.remove('active'); }
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') closeHelpModal();
+});
+</script>
 
 <script>
 // ── State ─────────────────────────────────────────────────────────────────
@@ -1312,7 +1390,7 @@ function ingestTableauXml(xml, filename) {
         return true;
     });
 
-    _tableauParsed = { datasources: uniqueDatasources, parameters, filename };
+    _tableauParsed = { datasources: uniqueDatasources, parameters, filename, doc };
 
     // Update file badge
     const fileList = document.getElementById('tableauFileList');
@@ -1375,6 +1453,14 @@ const TABLEAU_FUNC_MAP = {
     'DATE': 'Date', 'DATETIME': 'Datetime',
 };
 
+function _tableauInnerToSql(expr) {
+    // Convert Tableau bracket refs to bare warehouse identifiers.
+    let s = expr;
+    s = s.replace(/\bZN\s*\(([^()]+)\)/gi, '$1');
+    s = s.replace(/\[([^\]]+)\]/g, (_m, name) => name.replace(/[^A-Za-z0-9_]/g, '_').toUpperCase());
+    s = s.replace(/\/\s*([A-Z][A-Z0-9_]*)\b/g, '/NULLIF($1,0)');
+    return s;
+}
 function tableauParseLOD(formula) {
     const f = formula.trim();
     const lodMatch = f.match(/^\{\s*(FIXED|INCLUDE|EXCLUDE)\s*([\s\S]*?)\s*:\s*([\s\S]+?)\s*\}$/i);
@@ -1387,6 +1473,12 @@ function tableauParseLOD(formula) {
         const dm = dimsRaw.match(/\[([^\]]+)\]/g);
         if (dm) dm.forEach(d => dims.push(d.replace(/^\[|\]$/g, '')));
     }
+    // Determine aggregate function and inner expression for SQL emission
+    const aggMatch = aggRaw.match(/^(SUM|AVG|MIN|MAX|COUNTD|COUNT)\s*\(([\s\S]+)\)\s*$/i);
+    let aggFunc = 'SUM';
+    let innerExpr = aggRaw;
+    if (aggMatch) { aggFunc = aggMatch[1].toUpperCase(); innerExpr = aggMatch[2].trim(); }
+    const aggExpr = _tableauInnerToSql(innerExpr);
     let sigmaAgg = aggRaw;
     sigmaAgg = sigmaAgg.replace(/\bCOUNTD\s*\(/gi, 'CountDistinct(');
     sigmaAgg = sigmaAgg.replace(/\bSUM\s*\(/gi, 'Sum(');
@@ -1397,7 +1489,46 @@ function tableauParseLOD(formula) {
     sigmaAgg = sigmaAgg.replace(/\bCOUNT\s*\(([^)]+)\)/gi, 'CountIf(IsNotNull($1))');
     sigmaAgg = sigmaAgg.replace(/\[([A-Z][A-Z0-9_]{2,})\]/g, (m, c) => '[' + sigmaDisplayName(c) + ']');
     sigmaAgg = sigmaAgg.replace(/'([^']*)'/g, '"$1"');
-    return { lodType, dims, sigmaAgg };
+    return { lodType, dims, sigmaAgg, aggFunc, aggExpr };
+}
+
+// Worksheet view-dim index: maps a calc field key (uppercase) → array of view-dim sets.
+function _tableauExtractFieldRefsFromShelf(text) {
+    const refs = [];
+    const re = /\[[^\]]+\]\.\[([^\]]+)\]/g;
+    let m; while ((m = re.exec(text)) !== null) {
+        let inner = m[1];
+        const colon = inner.match(/^[a-z]{2,5}:([^:]+):[a-z]{2}$/i);
+        if (colon) inner = colon[1];
+        refs.push(inner);
+    }
+    return refs;
+}
+// `doc` is a DOM Document parsed from the .twb XML.
+function _tableauBuildWorksheetIndex(doc) {
+    const byField = new Map();
+    if (!doc || !doc.querySelectorAll) return { byField };
+    const worksheets = doc.querySelectorAll('worksheets > worksheet');
+    for (const ws of worksheets) {
+        const usedFields = new Set();
+        const shelves = [];
+        ws.querySelectorAll(':scope > table > rows, :scope > table > cols').forEach(n => shelves.push(n.textContent || ''));
+        for (const s of shelves) for (const ref of _tableauExtractFieldRefsFromShelf(s)) usedFields.add(ref.toUpperCase());
+        const dimFieldNames = new Set();
+        ws.querySelectorAll(':scope > table > view > datasource-dependencies > column').forEach(col => {
+            const role = col.getAttribute('role');
+            const name = (col.getAttribute('name') || '').replace(/^\[|\]$/g, '');
+            if (role === 'dimension') dimFieldNames.add(name.toUpperCase());
+        });
+        const viewDims = [];
+        for (const used of usedFields) if (dimFieldNames.has(used)) viewDims.push(used);
+        for (const used of usedFields) {
+            const list = byField.get(used) || [];
+            list.push({ dims: viewDims.slice() });
+            byField.set(used, list);
+        }
+    }
+    return { byField };
 }
 
 function tableauFormulaToSigma(formula, warnings) {
@@ -1914,6 +2045,92 @@ function runTableauConversion() {
             const factTableName = factEl.name
                 || (factEl.source && factEl.source.path ? factEl.source.path[factEl.source.path.length - 1] : 'FACT');
 
+            // ── LOD helper-element registry (kind:sql) ─────────────────────
+            const _lodWsIndex = _tableauBuildWorksheetIndex(_tableauParsed && _tableauParsed.doc);
+            const _lodHelpers = {};   // signatureKey → { element, groupDimNames[], groupDimColIds[], aggsByExpr{}, relationshipName }
+            const _lodUsedAliases = new Set();
+            const _lodMakeAlias = (caption) => {
+                let base = (caption || 'LOD_VAL').toUpperCase().replace(/[^A-Z0-9_]+/g, '_').replace(/^_+|_+$/g, '').replace(/_+/g, '_');
+                if (!base) base = 'LOD_VAL';
+                let a = base, n = 2;
+                while (_lodUsedAliases.has(a)) a = base + '_' + (n++);
+                _lodUsedAliases.add(a);
+                return a;
+            };
+            const _resolveLodDim = (dimName) => {
+                const found = displayNameMap[dimName.toUpperCase()] || displayNameMap[sigmaDisplayName(dimName).toUpperCase()];
+                if (!found) return null;
+                const parentCol = (found.el.columns || []).find(c => c.id === found.colId);
+                const fm = parentCol && parentCol.formula ? parentCol.formula.match(/\/([^\]]+)\]$/) : null;
+                const dispName = parentCol ? (parentCol.name || (fm ? fm[1] : dimName)) : dimName;
+                const dimUpper = (fm ? fm[1] : dispName).replace(/\s+/g, '_').toUpperCase();
+                return { dimUpper, displayName: dispName, baseColId: found.colId };
+            };
+            const _ensureLodHelper = (effectiveDims, dimResolved, relNameSuggestion) => {
+                if (!effectiveDims.length) return null;
+                const sigKey = effectiveDims.slice().sort().join(',');
+                if (_lodHelpers[sigKey]) return { helper: _lodHelpers[sigKey].element, signatureKey: sigKey };
+                const helperId = sigmaShortId();
+                const cols = [], order = [], groupDimColIds = [];
+                for (const d of dimResolved) {
+                    const colId = sigmaShortId();
+                    cols.push({ id: colId, formula: '[Custom SQL/' + d.dimUpper + ']', name: d.displayName });
+                    order.push(colId);
+                    groupDimColIds.push(colId);
+                }
+                const helperEl = {
+                    id: helperId, kind: 'table', name: relNameSuggestion,
+                    source: { connectionId: connectionId, kind: 'sql', statement: '__PLACEHOLDER__' },
+                    columns: cols, order
+                };
+                _lodHelpers[sigKey] = {
+                    element: helperEl, groupDimNames: effectiveDims.slice(),
+                    groupDimColIds, aggsByExpr: {}, relationshipName: relNameSuggestion
+                };
+                lodChildElements.push(helperEl);
+                return { helper: helperEl, signatureKey: sigKey };
+            };
+            const _ensureLodRelationship = (sigKey, dimResolved, relName) => {
+                const rec = _lodHelpers[sigKey]; if (!rec) return;
+                if ((factEl.relationships || []).find(r => r.targetElementId === rec.element.id)) return;
+                const keys = [];
+                for (let i = 0; i < dimResolved.length; i++) {
+                    const baseColId = dimResolved[i].baseColId;
+                    const helperColId = rec.groupDimColIds[i];
+                    if (!baseColId || !helperColId) return;
+                    keys.push({ sourceColumnId: baseColId, targetColumnId: helperColId });
+                }
+                if (!factEl.relationships) factEl.relationships = [];
+                factEl.relationships.push({ id: sigmaShortId(), targetElementId: rec.element.id, keys, name: relName });
+            };
+            const _addLodAgg = (sigKey, alias, aggFunc, aggExpr, caption) => {
+                const rec = _lodHelpers[sigKey]; if (!rec) return { alias, caption };
+                const dedupKey = aggFunc + '::' + aggExpr;
+                if (rec.aggsByExpr[dedupKey]) return { alias: rec.aggsByExpr[dedupKey].alias, caption: rec.aggsByExpr[dedupKey].caption };
+                const calcId = sigmaShortId();
+                rec.aggsByExpr[dedupKey] = { alias, aggFunc, aggExpr, calcId, caption };
+                rec.element.columns.push({ id: calcId, formula: '[Custom SQL/' + alias + ']', name: caption });
+                rec.element.order.push(calcId);
+                return { alias, caption };
+            };
+            const _finalizeLodHelpers = () => {
+                const baseFq = (factEl.source && factEl.source.path && factEl.source.path.length >= 2)
+                    ? factEl.source.path.join('.') : factTableName;
+                for (const sigKey of Object.keys(_lodHelpers)) {
+                    const rec = _lodHelpers[sigKey];
+                    const dimList = rec.groupDimNames.join(', ');
+                    const aggParts = [];
+                    for (const k of Object.keys(rec.aggsByExpr)) {
+                        const a = rec.aggsByExpr[k];
+                        let sqlAggFunc = a.aggFunc === 'COUNTD' ? ('COUNT(DISTINCT ' + a.aggExpr + ')') : (a.aggFunc + '(' + a.aggExpr + ')');
+                        aggParts.push(sqlAggFunc + ' AS ' + a.alias);
+                    }
+                    const groupByIdx = rec.groupDimNames.map((_d, i) => i + 1).join(', ');
+                    rec.element.source.statement =
+                        'SELECT ' + dimList + ', ' + aggParts.join(', ') + ' FROM ' + baseFq + ' GROUP BY ' + groupByIdx;
+                }
+            };
+
             for (const col of ds.element.querySelectorAll(':scope > column')) {
                 const rawName  = col.getAttribute('name') || '';
                 const caption  = col.getAttribute('caption') || rawName.replace(/^\[|\]$/g,'');
@@ -1988,97 +2205,65 @@ function runTableauConversion() {
 
                     if (sigmaFormula && typeof sigmaFormula === 'object' && sigmaFormula._isLOD) {
                         const lod = sigmaFormula;
-                        if (lod.lodType === 'FIXED' && lod.dims.length > 0) {
-                            let allDimsFound = true;
-                            const dimInfos = [];
-                            for (const dimName of lod.dims) {
-                                const found = displayNameMap[dimName.toUpperCase()]
-                                    || displayNameMap[sigmaDisplayName(dimName).toUpperCase()];
-                                if (found) {
-                                    const parentCol = (found.el.columns || []).find(c => c.id === found.colId);
-                                    const dispName  = parentCol
-                                        ? (parentCol.name || (parentCol.formula.match(/\/([^\]]+)\]$/) || [])[1] || dimName)
-                                        : dimName;
-                                    dimInfos.push({ displayName: dispName, parentColId: found.colId });
-                                } else {
-                                    allDimsFound = false;
-                                    warnings.push('⚠ LOD "' + caption + '": dim [' + dimName + '] not found');
-                                }
-                            }
-                            if (allDimsFound && dimInfos.length > 0) {
-                                const dimKey = dimInfos.map(d => d.displayName).sort().join(',');
-                                let existingChild = lodChildElements.find(ce => ce._dimKey === dimKey);
-                                if (existingChild) {
-                                    const existingFormulas = new Set(existingChild.columns.map(c => c.formula));
-                                    const aggColRefs = lod.sigmaAgg.match(/\[([^\]]+)\]/g) || [];
-                                    for (const ref of aggColRefs) {
-                                        const colName = ref.replace(/^\[|\]$/g, '');
-                                        const refFormula = '[' + factTableName + '/' + colName + ']';
-                                        if (!existingFormulas.has(refFormula)) {
-                                            existingFormulas.add(refFormula);
-                                            const refColId = sigmaShortId();
-                                            existingChild.columns.push({ id: refColId, formula: refFormula });
-                                            existingChild.order.push(refColId);
-                                        }
-                                    }
-                                    const calcId = sigmaShortId();
-                                    const fmt4a  = _inferSigmaFormat(lod.sigmaAgg, caption);
-                                    const lc4a   = { id: calcId, formula: lod.sigmaAgg, name: caption };
-                                    if (fmt4a) lc4a.format = fmt4a;
-                                    existingChild.columns.push(lc4a);
-                                    existingChild.order.push(calcId);
-                                    existingChild.groupings[0].calculations.push(calcId);
-                                } else {
-                                    const childId   = sigmaShortId();
-                                    const childCols = [], childOrder = [], groupByIds = [];
-                                    for (const di of dimInfos) {
-                                        const colId = sigmaShortId();
-                                        childCols.push({ id: colId, formula: '[' + factTableName + '/' + di.displayName + ']' });
-                                        childOrder.push(colId);
-                                        groupByIds.push(colId);
-                                    }
-                                    const aggColRefs  = lod.sigmaAgg.match(/\[([^\]]+)\]/g) || [];
-                                    const addedColNames = new Set(dimInfos.map(d => d.displayName.toUpperCase()));
-                                    for (const ref of aggColRefs) {
-                                        const colName = ref.replace(/^\[|\]$/g, '');
-                                        if (addedColNames.has(colName.toUpperCase())) continue;
-                                        addedColNames.add(colName.toUpperCase());
-                                        const refColId = sigmaShortId();
-                                        childCols.push({ id: refColId, formula: '[' + factTableName + '/' + colName + ']' });
-                                        childOrder.push(refColId);
-                                    }
-                                    const calcId = sigmaShortId();
-                                    const fmt4b  = _inferSigmaFormat(lod.sigmaAgg, caption);
-                                    const lc4b   = { id: calcId, formula: lod.sigmaAgg, name: caption };
-                                    if (fmt4b) lc4b.format = fmt4b;
-                                    childCols.push(lc4b);
-                                    childOrder.push(calcId);
-                                    const childEl = {
-                                        id: childId, kind: 'table',
-                                        name: factTableName + ' by ' + dimInfos.map(d => d.displayName).join(', '),
-                                        source: { elementId: factEl.id, kind: 'table' },
-                                        columns: childCols,
-                                        groupings: [{ id: sigmaShortId(), groupBy: groupByIds, calculations: [calcId] }],
-                                        order: childOrder,
-                                        _dimKey: dimKey
-                                    };
-                                    lodChildElements.push(childEl);
-                                }
-                                warnings.push('✅ LOD "' + caption + '" → child element');
-                                continue;
-                            }
-                        } else if (lod.lodType === 'FIXED' && lod.dims.length === 0) {
+                        // Resolve LOD dim names → display + warehouse identifiers
+                        const lodDimsResolved = []; let allFound = true;
+                        for (const dn of lod.dims) {
+                            const r = _resolveLodDim(dn);
+                            if (r) lodDimsResolved.push(r);
+                            else { allFound = false; warnings.push('⚠ LOD "' + caption + '": dim [' + dn + '] not found'); }
+                        }
+
+                        if (lod.lodType === 'FIXED' && lod.dims.length === 0) {
+                            // Table-scoped FIXED → metric
                             if (!factEl.metrics) factEl.metrics = [];
                             const fmt1 = _inferSigmaFormat(lod.sigmaAgg, caption);
-                            const m1   = { id: sigmaShortId(), formula: lod.sigmaAgg, name: caption };
+                            const m1 = { id: sigmaShortId(), formula: lod.sigmaAgg, name: caption };
                             if (fmt1) m1.format = fmt1;
                             factEl.metrics.push(m1);
                             warnings.push('✅ LOD "' + caption + '" (table-scoped FIXED) → metric');
                             continue;
                         }
-                        if (lod.lodType === 'INCLUDE') warnings.push('⚠ LOD "' + caption + '" (INCLUDE) → add grouping manually in Sigma');
-                        else if (lod.lodType === 'EXCLUDE') warnings.push('⚠ LOD "' + caption + '" (EXCLUDE) → add grouping manually in Sigma');
-                        warnings.push('⛔ "' + caption + '" LOD not auto-converted — add manually.');
+                        if (!allFound) continue;
+
+                        const fieldKeyUpper = fieldKey.toUpperCase();
+                        const viewContexts = _lodWsIndex.byField.get(fieldKeyUpper) || [];
+                        const viewDimSets = viewContexts.length > 0 ? viewContexts.map(c => c.dims.slice()) : [[]];
+
+                        const effectiveSets = []; const seenSigs = new Set();
+                        for (const viewDims of viewDimSets) {
+                            let effective;
+                            if (lod.lodType === 'FIXED') effective = lodDimsResolved.map(d => d.dimUpper);
+                            else if (lod.lodType === 'INCLUDE') {
+                                const set = new Set(viewDims);
+                                for (const d of lodDimsResolved) set.add(d.dimUpper);
+                                effective = Array.from(set);
+                            } else {
+                                const exclude = new Set(lodDimsResolved.map(d => d.dimUpper));
+                                effective = viewDims.filter(v => !exclude.has(v));
+                            }
+                            const sig = effective.slice().sort().join(',');
+                            if (sig && !seenSigs.has(sig)) { seenSigs.add(sig); effectiveSets.push(effective); }
+                        }
+                        if (effectiveSets.length === 0) {
+                            warnings.push('⚠ LOD "' + caption + '" (' + lod.lodType + ') — no view context; skipped');
+                            continue;
+                        }
+                        for (const effective of effectiveSets) {
+                            const dimResolved = []; let ok = true;
+                            for (const dn of effective) {
+                                const m = _resolveLodDim(dn);
+                                if (!m) { ok = false; warnings.push('⚠ LOD "' + caption + '" view dim [' + dn + '] not on base'); break; }
+                                dimResolved.push(m);
+                            }
+                            if (!ok) continue;
+                            const alias = _lodMakeAlias(caption);
+                            const relName = lod.lodType + ' ' + (lod.dims.join(', ') || '(table)') + (effectiveSets.length > 1 ? ' @ ' + effective.join('×') : '');
+                            const helperRes = _ensureLodHelper(effective, dimResolved, factTableName + ' ' + lod.lodType + ' ' + effective.join(', '));
+                            if (!helperRes) continue;
+                            _ensureLodRelationship(helperRes.signatureKey, dimResolved, relName);
+                            _addLodAgg(helperRes.signatureKey, alias, lod.aggFunc, lod.aggExpr, caption);
+                            warnings.push('✅ LOD "' + caption + '" (' + lod.lodType + ') → helper "' + helperRes.helper.name + '" alias ' + alias);
+                        }
                         continue;
                     }
 
@@ -2125,9 +2310,11 @@ function runTableauConversion() {
                 }
             }
 
+            // Finalize LOD helper SQL statements now that all aggregates are registered
+            _finalizeLodHelpers();
             if (lodChildElements.length > 0) {
                 for (const child of lodChildElements) { delete child._dimKey; elements.push(child); }
-                warnings.push('ℹ ' + lodChildElements.length + ' LOD child element' + (lodChildElements.length!==1?'s':'') + ' created');
+                warnings.push('ℹ ' + lodChildElements.length + ' LOD helper element' + (lodChildElements.length!==1?'s':'') + ' created');
             }
             if (setColIds.length > 0) {
                 if (!factEl.folders) factEl.folders = [];

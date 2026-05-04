@@ -112,7 +112,7 @@ When `TABLEAU_SERVER`, `TABLEAU_PAT_NAME`, and `TABLEAU_PAT_SECRET` are all set,
 | Parameters | Sigma controls (`list`, `date-range`, `text-input`) |
 | Sets | Boolean calculated columns |
 | Bins | `Floor()` bucketed calculated columns |
-| LOD FIXED expressions | Child elements with explicit grouping |
+| LOD FIXED / INCLUDE / EXCLUDE | `kind:sql` helper element per unique GROUP BY signature + relationship from the base element. View dims for INCLUDE/EXCLUDE come from worksheet rows/cols shelves. Multiple LODs sharing a signature share one helper. |
 
 ### Formula Conversion
 
@@ -167,7 +167,7 @@ When `TABLEAU_SERVER`, `TABLEAU_PAT_NAME`, and `TABLEAU_PAT_SECRET` are all set,
 
 ### Known Limitations
 
-- **LOD INCLUDE / EXCLUDE** — Cannot be auto-converted. Generates a warning; recreate using child elements with groupings in the Sigma UI.
+- **LOD INCLUDE / EXCLUDE without worksheet context** — When a calc is not placed on any worksheet's rows/cols shelf, the converter cannot derive the view dimensions and the LOD is skipped with a warning. Place the calc on at least one worksheet so the converter can determine the effective grouping.
 - **Complex table calculations** — `LOOKUP`, `PREVIOUS_VALUE`, `WINDOW_SUM`, `WINDOW_AVG` are flagged but not converted.
 - **Data blending** — Multi-connection workbooks are not supported; each data source is converted independently.
 - **Extracts (`.hyper`)** — Extract-only fields and extract filters are not converted.
